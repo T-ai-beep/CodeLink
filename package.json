@@ -1,0 +1,28 @@
+{
+  "name": "educode",
+  "version": "1.0.0",
+  "description": "A backend-only school hub manager with a beautiful terminal UI",
+  "main": "dist/index.js",
+  "bin": {
+    "educode": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "chalk": "^4.1.2",
+    "cli-table3": "^0.6.3",
+    "inquirer": "^8.2.6",
+    "ora": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/inquirer": "^8.2.10",
+    "@types/node": "^20.11.20",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
