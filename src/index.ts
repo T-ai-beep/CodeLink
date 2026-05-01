@@ -5,6 +5,7 @@ import { runCreate } from './commands/create';
 import { runUpdate } from './commands/update';
 import { runView } from './commands/view';
 import { runList } from './commands/list';
+import { runDelete } from './commands/delete';
 
 const BANNER = `
 ${chalk.bold.blue('╔═══════════════════════════════╗')}
@@ -12,13 +13,14 @@ ${chalk.bold.blue('║')}  ${chalk.bold.cyan('EduCode')} ${chalk.grey('— Schoo
 ${chalk.bold.blue('╚═══════════════════════════════╝')}
 `;
 
-type Command = 'create' | 'update' | 'view' | 'list' | 'exit';
+type Command = 'create' | 'update' | 'view' | 'list' | 'delete' | 'exit';
 
 const COMMAND_HANDLERS: Record<Exclude<Command, 'exit'>, () => Promise<void>> = {
   create: runCreate,
   update: runUpdate,
   view: runView,
   list: runList,
+  delete: runDelete,
 };
 
 async function selectCommand(): Promise<Command> {
@@ -32,6 +34,7 @@ async function selectCommand(): Promise<Command> {
         { name: `${chalk.yellow('update')}  — Update an existing hub's links`, value: 'update' },
         { name: `${chalk.cyan('view')}    — View full details of a hub`, value: 'view' },
         { name: `${chalk.blue('list')}    — List all active hubs`, value: 'list' },
+        { name: `${chalk.red('delete')}  — Permanently delete a hub`, value: 'delete' },
         new inquirer.Separator(),
         { name: `${chalk.grey('exit')}    — Quit EduCode`, value: 'exit' },
       ],

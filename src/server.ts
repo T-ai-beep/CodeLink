@@ -172,6 +172,105 @@ function renderNotFound(code: string): string {
 </html>`;
 }
 
+function renderHomepage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EduCode</title>
+  <style>
+    ${BASE_STYLES}
+    body {
+      background: #ffffff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px;
+    }
+    .container {
+      width: 100%;
+      max-width: 600px;
+    }
+    .brand {
+      font-size: 2.2rem;
+      font-weight: 800;
+      color: #111;
+      letter-spacing: -0.03em;
+      margin-bottom: 6px;
+    }
+    .tagline {
+      font-size: 1rem;
+      color: #666;
+      margin-bottom: 36px;
+    }
+    input[type="text"] {
+      display: block;
+      width: 100%;
+      padding: 18px 20px;
+      font-size: 1.1rem;
+      font-family: inherit;
+      border: 2px solid #e5e7eb;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      outline: none;
+      margin-bottom: 12px;
+      color: #111;
+    }
+    input[type="text"]:focus {
+      border-color: #111;
+    }
+    button[type="submit"] {
+      display: block;
+      width: 100%;
+      padding: 18px 20px;
+      font-size: 1.1rem;
+      font-family: inherit;
+      font-weight: 700;
+      background: #111;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="brand">EduCode</div>
+    <div class="tagline">Enter your class code to access your hub.</div>
+    <form action="/go" method="GET">
+      <input
+        type="text"
+        name="code"
+        placeholder="Enter your code (e.g. SKN)"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"
+      />
+      <button type="submit">Go</button>
+    </form>
+  </div>
+</body>
+</html>`;
+}
+
+app.get('/', (_req, res) => {
+  res.status(200).send(renderHomepage());
+});
+
+app.get('/go', (req, res) => {
+  const raw = typeof req.query.code === 'string' ? req.query.code : '';
+  const code = raw.trim().toUpperCase();
+  if (!code) {
+    res.redirect(302, '/');
+    return;
+  }
+  res.redirect(302, `/c/${encodeURIComponent(code)}`);
+});
+
 app.get('/c/:code', (req, res) => {
   let db;
   try {

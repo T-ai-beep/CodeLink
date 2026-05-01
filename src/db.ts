@@ -185,3 +185,7 @@ export function isHubExpired(hub: Hub): boolean {
   if (hub.expires_at === null) return false;
   return Math.floor(Date.now() / 1000) > hub.expires_at;
 }
+
+export function deleteHub(db: Database.Database, hubId: number): void {
+  db.prepare('DELETE FROM hubs WHERE id = ?').run(hubId);
+}
