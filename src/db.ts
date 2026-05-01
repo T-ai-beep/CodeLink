@@ -12,6 +12,8 @@ export interface Hub {
   label: string;
   created_at: string;
   updated_at: string;
+  expires_at: number | null;
+  fallback_msg: string | null;
 }
 
 export interface Link {
@@ -65,9 +67,21 @@ function initSchema(db: Database.Database): void {
   `);
 }
 
+function migrateSchema(db: Database.Database): void {
+  const cols = db.pragma('table_info(hubs)') as Array<{ name: string }>;
+  const colNames = cols.map((c) => c.name);
+  if (!colNames.includes('expires_at')) {
+    db.exec('ALTER TABLE hubs ADD COLUMN expires_at INTEGER');
+  }
+  if (!colNames.includes('fallback_msg')) {
+    db.exec('ALTER TABLE hubs ADD COLUMN fallback_msg TEXT');
+  }
+}
+
 export function getDb(): Database.Database {
   const db = openDb();
   initSchema(db);
+  migrateSchema(db);
   return db;
 }
 
@@ -150,4 +164,24 @@ export function updateHub(
   });
 
   transaction();
+}
+
+export function updateHubExpiry(
+  db: Database.Database,
+  hubId: number,
+  expiresAt: number,
+  fallbackMsg: string
+): void {
+  db.prepare('UPDATE hubs SET expires_at = ?, fallback_msg = ? WHERE id = ?')
+    .run(expiresAt, fallbackMsg, hubId);
+}
+
+export function clearHubExpiry(db: Database.Database, hubId: number): void {
+  db.prepare('UPDATE hubs SET expires_at = NULL, fallback_msg = NULL WHERE id = ?')
+    .run(hubId);
+}
+
+export function isHubExpired(hub: Hub): boolean {
+  if (hub.expires_at === null) return false;
+  return Math.floor(Date.now() / 1000) > hub.expires_at;
 }

@@ -1,8 +1,34 @@
 import inquirer from 'inquirer';
 import ora from 'ora';
-import { getDb, getAllHubs, getHubWithLinks, updateHub } from '../db';
-import { printSuccess, printError, printWarning, printHeader, getDaysSince } from '../ui/display';
+import { getDb, getAllHubs, getHubWithLinks, updateHub, updateHubExpiry, clearHubExpiry } from '../db';
+import { printSuccess, printError, printWarning, printInfo, printHeader, getDaysSince } from '../ui/display';
 import type { NewLink } from '../db';
+
+function validateDate(input: string): true | string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return 'Use format YYYY-MM-DD (e.g. 2025-06-15).';
+  }
+  const d = new Date(input + 'T00:00:00');
+  if (isNaN(d.getTime())) {
+    return 'Invalid date. Please enter a real calendar date.';
+  }
+  return true;
+}
+
+function validateTime(input: string): true | string {
+  if (!/^\d{2}:\d{2}$/.test(input)) {
+    return 'Use format HH:MM in 24h (e.g. 14:30).';
+  }
+  const [h, m] = input.split(':').map(Number);
+  if (h < 0 || h > 23 || m < 0 || m > 59) {
+    return 'Invalid time. Hours 00–23, minutes 00–59.';
+  }
+  return true;
+}
+
+function toUnixTimestamp(date: string, time: string): number {
+  return Math.floor(new Date(`${date}T${time}:00`).getTime() / 1000);
+}
 
 export async function runUpdate(): Promise<void> {
   printHeader('Update Existing Hub');
@@ -132,6 +158,117 @@ export async function runUpdate(): Promise<void> {
       links.push({ title, url });
     }
 
+    let expiresAt: number | null = null;
+    let fallbackMsg: string = '';
+    let shouldClearExpiry: boolean = false;
+
+    console.log('');
+
+    if (hub.expires_at !== null) {
+      const currentExpiry = new Date(hub.expires_at * 1000).toLocaleString();
+      printInfo(`Current expiry: ${currentExpiry}`);
+
+      const { removeExpiry } = await inquirer.prompt<{ removeExpiry: boolean }>([
+        {
+          type: 'confirm',
+          name: 'removeExpiry',
+          message: 'Remove expiry?',
+          default: false,
+        },
+      ]);
+
+      if (removeExpiry) {
+        shouldClearExpiry = true;
+      } else {
+        const { changeExpiry } = await inquirer.prompt<{ changeExpiry: boolean }>([
+          {
+            type: 'confirm',
+            name: 'changeExpiry',
+            message: 'Update expiry?',
+            default: false,
+          },
+        ]);
+
+        if (changeExpiry) {
+          const { expiryDate } = await inquirer.prompt<{ expiryDate: string }>([
+            {
+              type: 'input',
+              name: 'expiryDate',
+              message: 'Expiry date (YYYY-MM-DD):',
+              validate: validateDate,
+            },
+          ]);
+
+          const { expiryTime } = await inquirer.prompt<{ expiryTime: string }>([
+            {
+              type: 'input',
+              name: 'expiryTime',
+              message: 'Expiry time (HH:MM, 24h, local time):',
+              validate: validateTime,
+            },
+          ]);
+
+          const { expFallback } = await inquirer.prompt<{ expFallback: string }>([
+            {
+              type: 'input',
+              name: 'expFallback',
+              message: 'Fallback message (shown after expiry):',
+              default: hub.fallback_msg ?? '',
+              validate: (input: string) =>
+                input.trim() ? true : 'Fallback message cannot be empty.',
+              filter: (input: string) => input.trim(),
+            },
+          ]);
+
+          expiresAt = toUnixTimestamp(expiryDate, expiryTime);
+          fallbackMsg = expFallback;
+        }
+      }
+    } else {
+      const { setExpiry } = await inquirer.prompt<{ setExpiry: boolean }>([
+        {
+          type: 'confirm',
+          name: 'setExpiry',
+          message: 'Set an expiry for this hub?',
+          default: false,
+        },
+      ]);
+
+      if (setExpiry) {
+        const { expiryDate } = await inquirer.prompt<{ expiryDate: string }>([
+          {
+            type: 'input',
+            name: 'expiryDate',
+            message: 'Expiry date (YYYY-MM-DD):',
+            validate: validateDate,
+          },
+        ]);
+
+        const { expiryTime } = await inquirer.prompt<{ expiryTime: string }>([
+          {
+            type: 'input',
+            name: 'expiryTime',
+            message: 'Expiry time (HH:MM, 24h, local time):',
+            validate: validateTime,
+          },
+        ]);
+
+        const { expFallback } = await inquirer.prompt<{ expFallback: string }>([
+          {
+            type: 'input',
+            name: 'expFallback',
+            message: 'Fallback message (shown after expiry):',
+            validate: (input: string) =>
+              input.trim() ? true : 'Fallback message cannot be empty.',
+            filter: (input: string) => input.trim(),
+          },
+        ]);
+
+        expiresAt = toUnixTimestamp(expiryDate, expiryTime);
+        fallbackMsg = expFallback;
+      }
+    }
+
     const { confirmed } = await inquirer.prompt<{ confirmed: boolean }>([
       {
         type: 'confirm',
@@ -150,6 +287,11 @@ export async function runUpdate(): Promise<void> {
 
     try {
       updateHub(db, hub.id, label, links);
+      if (shouldClearExpiry) {
+        clearHubExpiry(db, hub.id);
+      } else if (expiresAt !== null) {
+        updateHubExpiry(db, hub.id, expiresAt, fallbackMsg);
+      }
       saveSpinner.succeed('Hub updated successfully.');
     } catch (err) {
       saveSpinner.fail('Failed to update hub.');
