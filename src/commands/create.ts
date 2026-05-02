@@ -1,8 +1,34 @@
 import inquirer from 'inquirer';
 import ora from 'ora';
-import { getDb, hubExists, createHub } from '../db';
+import { getDb, hubExists, createHub, updateHubExpiry } from '../db';
 import { printSuccess, printError, printWarning, printHeader } from '../ui/display';
 import type { NewLink } from '../db';
+
+function validateDate(input: string): true | string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return 'Use format YYYY-MM-DD (e.g. 2025-06-15).';
+  }
+  const d = new Date(input + 'T00:00:00');
+  if (isNaN(d.getTime())) {
+    return 'Invalid date. Please enter a real calendar date.';
+  }
+  return true;
+}
+
+function validateTime(input: string): true | string {
+  if (!/^\d{2}:\d{2}$/.test(input)) {
+    return 'Use format HH:MM in 24h (e.g. 14:30).';
+  }
+  const [h, m] = input.split(':').map(Number);
+  if (h < 0 || h > 23 || m < 0 || m > 59) {
+    return 'Invalid time. Hours 00–23, minutes 00–59.';
+  }
+  return true;
+}
+
+function toUnixTimestamp(date: string, time: string): number {
+  return Math.floor(new Date(`${date}T${time}:00`).getTime() / 1000);
+}
 
 export async function runCreate(): Promise<void> {
   printHeader('Create New Hub');
@@ -111,10 +137,59 @@ export async function runCreate(): Promise<void> {
       links.push({ title, url });
     }
 
+    let expiresAt: number | null = null;
+    let fallbackMsg: string = '';
+
+    const { setExpiry } = await inquirer.prompt<{ setExpiry: boolean }>([
+      {
+        type: 'confirm',
+        name: 'setExpiry',
+        message: 'Set an expiry for this hub?',
+        default: false,
+      },
+    ]);
+
+    if (setExpiry) {
+      const { expiryDate } = await inquirer.prompt<{ expiryDate: string }>([
+        {
+          type: 'input',
+          name: 'expiryDate',
+          message: 'Expiry date (YYYY-MM-DD):',
+          validate: validateDate,
+        },
+      ]);
+
+      const { expiryTime } = await inquirer.prompt<{ expiryTime: string }>([
+        {
+          type: 'input',
+          name: 'expiryTime',
+          message: 'Expiry time (HH:MM, 24h, local time):',
+          validate: validateTime,
+        },
+      ]);
+
+      const { expFallback } = await inquirer.prompt<{ expFallback: string }>([
+        {
+          type: 'input',
+          name: 'expFallback',
+          message: 'Fallback message (shown after expiry):',
+          validate: (input: string) =>
+            input.trim() ? true : 'Fallback message cannot be empty.',
+          filter: (input: string) => input.trim(),
+        },
+      ]);
+
+      expiresAt = toUnixTimestamp(expiryDate, expiryTime);
+      fallbackMsg = expFallback;
+    }
+
     const saveSpinner = ora('Creating hub...').start();
 
     try {
-      createHub(db, { code, label }, links);
+      const newHub = createHub(db, { code, label }, links);
+      if (expiresAt !== null) {
+        updateHubExpiry(db, newHub.id, expiresAt, fallbackMsg);
+      }
       saveSpinner.succeed('Hub created successfully.');
     } catch (err) {
       saveSpinner.fail('Failed to create hub.');
