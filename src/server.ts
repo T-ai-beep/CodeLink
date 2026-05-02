@@ -275,7 +275,7 @@ function renderHomepage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EduCode</title>
+  <title>Lode</title>
   <style>
     ${BASE_STYLES}
     body {
@@ -336,7 +336,7 @@ function renderHomepage(): string {
 </head>
 <body>
   <div class="container">
-    <div class="brand">EduCode</div>
+    <div class="brand">Lode</div>
     <div class="tagline">Enter your class code to access your hub.</div>
     <form action="/go" method="GET">
       <input
@@ -428,7 +428,7 @@ function renderLeave(url: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>You're leaving EduCode</title>
+  <title>You're leaving Lode</title>
   <style>
     ${BASE_STYLES}
     body {
@@ -460,7 +460,7 @@ function renderLeave(url: string): string {
 </head>
 <body>
   <div class="box">
-    <h1>You're leaving EduCode</h1>
+    <h1>You're leaving Lode</h1>
     <p class="sub">We don't control this destination and cannot verify its content. Proceed with caution.</p>
     <div class="url-box">${esc(url)}</div>
     <div class="actions">
@@ -554,6 +554,6 @@ app.get('/leave', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`EduCode server running at http://localhost:${PORT}`);
+  console.log(`Lode server running at http://localhost:${PORT}`);
   console.log(`Student hubs available at http://localhost:${PORT}/c/<CODE>`);
 });

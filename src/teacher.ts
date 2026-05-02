@@ -1,10 +1,13 @@
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import {
   getDb, getAllHubs, getFormByHubId, getFormWithFields,
   createForm, updateForm, deleteForm,
   getFormResponsesWithAnswers, getResponseCount,
 } from './db';
 import type { Hub, FormField, FieldType, NewFormField } from './db';
+import authRouter from './auth';
+import { attachUser, requireTeacher } from './middleware/auth';
 
 const TEACHER_PORT = process.env.TEACHER_PORT
   ? parseInt(process.env.TEACHER_PORT, 10)
@@ -12,6 +15,9 @@ const TEACHER_PORT = process.env.TEACHER_PORT
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+app.use(attachUser);
+app.use(authRouter);
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -149,13 +155,16 @@ function layout(title: string, content: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${esc(title)} — EduCode Teacher</title>
+  <title>${esc(title)} — Lode</title>
   <style>${CSS}</style>
 </head>
 <body>
   <aside class="sidebar">
-    <div class="sidebar-brand">EduCode<span>Teacher Dashboard</span></div>
-    <nav class="sidebar-nav"><a href="/" class="active">Hubs</a></nav>
+    <div class="sidebar-brand">Lode<span>Teacher Dashboard</span></div>
+    <nav class="sidebar-nav">
+      <a href="/" class="active">Hubs</a>
+      <a href="/logout">Logout</a>
+    </nav>
   </aside>
   <main class="main">${content}</main>
 </body>
@@ -318,6 +327,8 @@ function formBuilderPage(
 }
 
 // ─── routes ──────────────────────────────────────────────────────────────────
+
+app.use(requireTeacher);
 
 app.get('/', (_req, res) => {
   let db;
@@ -569,5 +580,5 @@ app.get('/hubs/:hubId/forms/:id/responses/export', (req, res) => {
 // ─── start ───────────────────────────────────────────────────────────────────
 
 app.listen(TEACHER_PORT, () => {
-  console.log(`EduCode teacher dashboard at http://localhost:${TEACHER_PORT}`);
+  console.log(`Lode teacher dashboard at http://localhost:${TEACHER_PORT}`);
 });

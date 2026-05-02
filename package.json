@@ -1,5 +1,5 @@
 {
-  "name": "educode",
+  "name": "lode",
   "version": "1.0.0",
   "description": "A backend-only school hub manager with a beautiful terminal UI",
   "main": "dist/index.js",
@@ -14,15 +14,19 @@
     "teacher": "node dist/teacher.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "better-sqlite3": "^9.4.3",
     "chalk": "^4.1.2",
     "cli-table3": "^0.6.3",
+    "cookie-parser": "^1.4.7",
     "express": "^4.18.3",
     "inquirer": "^8.2.6",
     "ora": "^5.4.1"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/better-sqlite3": "^7.6.8",
+    "@types/cookie-parser": "^1.4.10",
     "@types/express": "^4.17.21",
     "@types/inquirer": "^8.2.10",
     "@types/node": "^20.11.20",

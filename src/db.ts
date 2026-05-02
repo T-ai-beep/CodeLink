@@ -2,9 +2,39 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import crypto from 'crypto';
 
 const DB_DIR = path.join(os.homedir(), '.educode');
 const DB_PATH = path.join(DB_DIR, 'educode.db');
+
+export interface School {
+  id: number;
+  name: string;
+  domain: string | null;
+  branding_logo: string | null;
+  branding_color: string;
+  created_at: string;
+}
+
+export type UserRole = 'admin' | 'teacher' | 'officer';
+
+export interface User {
+  id: number;
+  school_id: number;
+  email: string;
+  password_hash: string;
+  role: UserRole;
+  name: string;
+  created_at: string;
+  last_active: string | null;
+}
+
+export interface Session {
+  id: string;
+  user_id: number;
+  created_at: string;
+  expires_at: string;
+}
 
 export interface Hub {
   id: number;
@@ -14,6 +44,11 @@ export interface Hub {
   updated_at: string;
   expires_at: number | null;
   fallback_msg: string | null;
+  school_id: number | null;
+  user_id: number | null;
+  status: string;
+  category: string | null;
+  notes: string | null;
 }
 
 export interface Link {
@@ -147,6 +182,33 @@ function initSchema(db: Database.Database): void {
       field_id    INTEGER NOT NULL REFERENCES form_fields(id) ON DELETE CASCADE,
       value       TEXT    NOT NULL DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS schools (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      name            TEXT    NOT NULL,
+      domain          TEXT    NULL,
+      branding_logo   TEXT    NULL,
+      branding_color  TEXT    NOT NULL DEFAULT '#000000',
+      created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      school_id     INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+      email         TEXT    NOT NULL UNIQUE,
+      password_hash TEXT    NOT NULL,
+      role          TEXT    NOT NULL,
+      name          TEXT    NOT NULL,
+      created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+      last_active   TEXT    NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id         TEXT    PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT    NOT NULL
+    );
   `);
 }
 
@@ -158,6 +220,21 @@ function migrateSchema(db: Database.Database): void {
   }
   if (!colNames.includes('fallback_msg')) {
     db.exec('ALTER TABLE hubs ADD COLUMN fallback_msg TEXT');
+  }
+  if (!colNames.includes('school_id')) {
+    db.exec('ALTER TABLE hubs ADD COLUMN school_id INTEGER REFERENCES schools(id) ON DELETE CASCADE');
+  }
+  if (!colNames.includes('user_id')) {
+    db.exec('ALTER TABLE hubs ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL');
+  }
+  if (!colNames.includes('status')) {
+    db.exec("ALTER TABLE hubs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  }
+  if (!colNames.includes('category')) {
+    db.exec('ALTER TABLE hubs ADD COLUMN category TEXT');
+  }
+  if (!colNames.includes('notes')) {
+    db.exec('ALTER TABLE hubs ADD COLUMN notes TEXT');
   }
 }
 
@@ -407,4 +484,96 @@ export function addFormField(db: Database.Database, formId: number, field: NewFo
     field.options ? JSON.stringify(field.options) : null,
     field.order_index
   );
+}
+
+// ─── schools ─────────────────────────────────────────────────────────────────
+
+export function createSchool(db: Database.Database, name: string, domain: string | null): School {
+  const result = db.prepare(
+    `INSERT INTO schools (name, domain) VALUES (?, ?)`
+  ).run(name, domain);
+  return db.prepare('SELECT * FROM schools WHERE id = ?').get(result.lastInsertRowid) as School;
+}
+
+export function getSchoolById(db: Database.Database, id: number): School | undefined {
+  return db.prepare('SELECT * FROM schools WHERE id = ?').get(id) as School | undefined;
+}
+
+export function updateSchoolBranding(
+  db: Database.Database,
+  schoolId: number,
+  logo: string | null,
+  color: string
+): void {
+  db.prepare('UPDATE schools SET branding_logo = ?, branding_color = ? WHERE id = ?')
+    .run(logo, color, schoolId);
+}
+
+export function schoolExists(db: Database.Database): boolean {
+  return db.prepare('SELECT id FROM schools LIMIT 1').get() !== undefined;
+}
+
+// ─── users ────────────────────────────────────────────────────────────────────
+
+export function createUser(
+  db: Database.Database,
+  schoolId: number,
+  email: string,
+  passwordHash: string,
+  role: UserRole,
+  name: string
+): User {
+  const result = db.prepare(
+    `INSERT INTO users (school_id, email, password_hash, role, name) VALUES (?, ?, ?, ?, ?)`
+  ).run(schoolId, email, passwordHash, role, name);
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid) as User;
+}
+
+export function getUserByEmail(db: Database.Database, email: string): User | undefined {
+  return db.prepare('SELECT * FROM users WHERE email = ?').get(email) as User | undefined;
+}
+
+export function getUserById(db: Database.Database, id: number): User | undefined {
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(id) as User | undefined;
+}
+
+export function getUsersBySchool(db: Database.Database, schoolId: number): User[] {
+  return db.prepare('SELECT * FROM users WHERE school_id = ? ORDER BY name ASC').all(schoolId) as User[];
+}
+
+export function updateUserRole(db: Database.Database, userId: number, role: UserRole): void {
+  db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+}
+
+export function deleteUser(db: Database.Database, userId: number): void {
+  db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+}
+
+export function updateLastActive(db: Database.Database, userId: number): void {
+  db.prepare("UPDATE users SET last_active = datetime('now') WHERE id = ?").run(userId);
+}
+
+// ─── sessions ─────────────────────────────────────────────────────────────────
+
+export function createSession(db: Database.Database, userId: number): string {
+  const id = crypto.randomUUID();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  db.prepare(`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`)
+    .run(id, userId, expiresAt);
+  return id;
+}
+
+export function getSession(db: Database.Database, sessionId: string): User | undefined {
+  const session = db.prepare('SELECT * FROM sessions WHERE id = ?')
+    .get(sessionId) as Session | undefined;
+  if (!session) return undefined;
+  if (new Date(session.expires_at) < new Date()) {
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    return undefined;
+  }
+  return getUserById(db, session.user_id);
+}
+
+export function deleteSession(db: Database.Database, sessionId: string): void {
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
 }
