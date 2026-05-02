@@ -231,6 +231,20 @@ function initSchema(db: Database.Database): void {
       size        INTEGER NOT NULL,
       created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS hub_access_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      hub_id      INTEGER NOT NULL REFERENCES hubs(id) ON DELETE CASCADE,
+      accessed_at TEXT    NOT NULL DEFAULT (datetime('now')),
+      device_hint TEXT    NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS link_click_log (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      hub_id     INTEGER NOT NULL REFERENCES hubs(id) ON DELETE CASCADE,
+      link_url   TEXT    NOT NULL,
+      clicked_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 }
 
@@ -631,4 +645,127 @@ export function getFileByStoredName(db: Database.Database, storedName: string): 
 
 export function deleteFile(db: Database.Database, id: number): void {
   db.prepare('DELETE FROM files WHERE id = ?').run(id);
+}
+
+// ─── analytics tables (added to initSchema via migrateSchema-style check) ────
+// Tables created in initSchema above; functions here.
+
+export interface AccessStats {
+  total_accesses: number;
+  accesses_today: number;
+  accesses_last_10_min: number;
+  accesses_this_week: number;
+  peak_hour: number;
+  device_breakdown: { mobile: number; desktop: number; unknown: number };
+}
+
+export interface LinkClickStat {
+  url: string;
+  title: string;
+  clicks: number;
+}
+
+export interface SchoolWideStats {
+  total_hubs: number;
+  accesses_today: number;
+  form_submissions_today: number;
+  most_accessed_hub_today: { code: string; label: string; count: number } | null;
+  hub_table: Array<{ code: string; label: string; accesses_today: number; total_accesses: number }>;
+  teacher_leaderboard: Array<{ name: string; accesses_today: number }>;
+}
+
+export function logHubAccess(db: Database.Database, hubId: number, deviceHint: string | null): void {
+  db.prepare(`INSERT INTO hub_access_log (hub_id, device_hint) VALUES (?, ?)`).run(hubId, deviceHint);
+}
+
+export function logLinkClick(db: Database.Database, hubId: number, linkUrl: string): void {
+  db.prepare(`INSERT INTO link_click_log (hub_id, link_url) VALUES (?, ?)`).run(hubId, linkUrl);
+}
+
+export function getHubAccessStats(db: Database.Database, hubId: number): AccessStats {
+  const total = (db.prepare('SELECT COUNT(*) as count FROM hub_access_log WHERE hub_id = ?').get(hubId) as { count: number }).count;
+  const today = (db.prepare("SELECT COUNT(*) as count FROM hub_access_log WHERE hub_id = ? AND date(accessed_at) = date('now')").get(hubId) as { count: number }).count;
+  const last10 = (db.prepare("SELECT COUNT(*) as count FROM hub_access_log WHERE hub_id = ? AND accessed_at >= datetime('now', '-10 minutes')").get(hubId) as { count: number }).count;
+  const thisWeek = (db.prepare("SELECT COUNT(*) as count FROM hub_access_log WHERE hub_id = ? AND accessed_at >= datetime('now', '-7 days')").get(hubId) as { count: number }).count;
+  const peakRow = db.prepare("SELECT strftime('%H', accessed_at) as hour, COUNT(*) as count FROM hub_access_log WHERE hub_id = ? GROUP BY hour ORDER BY count DESC LIMIT 1").get(hubId) as { hour: string; count: number } | undefined;
+  const peakHour = peakRow ? parseInt(peakRow.hour, 10) : 0;
+  const deviceRows = db.prepare("SELECT device_hint, COUNT(*) as count FROM hub_access_log WHERE hub_id = ? GROUP BY device_hint").all(hubId) as Array<{ device_hint: string | null; count: number }>;
+  const device_breakdown = { mobile: 0, desktop: 0, unknown: 0 };
+  for (const row of deviceRows) {
+    if (row.device_hint === 'mobile') device_breakdown.mobile = row.count;
+    else if (row.device_hint === 'desktop') device_breakdown.desktop = row.count;
+    else device_breakdown.unknown += row.count;
+  }
+  return { total_accesses: total, accesses_today: today, accesses_last_10_min: last10, accesses_this_week: thisWeek, peak_hour: peakHour, device_breakdown };
+}
+
+export function getLinkClickStats(db: Database.Database, hubId: number): LinkClickStat[] {
+  return db.prepare(`
+    SELECT lcl.link_url as url,
+           COALESCE(l.title, lcl.link_url) as title,
+           COUNT(*) as clicks
+    FROM link_click_log lcl
+    LEFT JOIN links l ON l.hub_id = lcl.hub_id AND l.url = lcl.link_url
+    WHERE lcl.hub_id = ?
+    GROUP BY lcl.link_url
+    ORDER BY clicks DESC
+  `).all(hubId) as LinkClickStat[];
+}
+
+export function getFormSubmissionRate(db: Database.Database, hubId: number): number {
+  const accesses = (db.prepare('SELECT COUNT(*) as count FROM hub_access_log WHERE hub_id = ?').get(hubId) as { count: number }).count;
+  if (accesses === 0) return 0;
+  const form = db.prepare('SELECT id FROM forms WHERE hub_id = ?').get(hubId) as { id: number } | undefined;
+  if (!form) return 0;
+  const submissions = (db.prepare('SELECT COUNT(*) as count FROM form_responses WHERE form_id = ?').get(form.id) as { count: number }).count;
+  return Math.round((submissions / accesses) * 100);
+}
+
+export function getHubAccessByDay(db: Database.Database, hubId: number): Array<{ date: string; count: number }> {
+  return db.prepare(`
+    SELECT date(accessed_at) as date, COUNT(*) as count
+    FROM hub_access_log
+    WHERE hub_id = ? AND accessed_at >= date('now', '-6 days')
+    GROUP BY date(accessed_at)
+  `).all(hubId) as Array<{ date: string; count: number }>;
+}
+
+export function getSchoolWideStats(db: Database.Database, schoolId: number): SchoolWideStats {
+  const total_hubs = (db.prepare("SELECT COUNT(*) as count FROM hubs WHERE school_id = ?").get(schoolId) as { count: number }).count;
+  const accesses_today = (db.prepare(`
+    SELECT COUNT(*) as count FROM hub_access_log hal
+    JOIN hubs h ON h.id = hal.hub_id
+    WHERE h.school_id = ? AND date(hal.accessed_at) = date('now')
+  `).get(schoolId) as { count: number }).count;
+  const form_submissions_today = (db.prepare(`
+    SELECT COUNT(*) as count FROM form_responses fr
+    JOIN forms f ON f.id = fr.form_id
+    JOIN hubs h ON h.id = f.hub_id
+    WHERE h.school_id = ? AND date(fr.submitted_at) = date('now')
+  `).get(schoolId) as { count: number }).count;
+  const most_accessed_hub_today = db.prepare(`
+    SELECT h.code, h.label, COUNT(hal.id) as count
+    FROM hub_access_log hal
+    JOIN hubs h ON h.id = hal.hub_id
+    WHERE h.school_id = ? AND date(hal.accessed_at) = date('now')
+    GROUP BY h.id ORDER BY count DESC LIMIT 1
+  `).get(schoolId) as { code: string; label: string; count: number } | null ?? null;
+  const hub_table = db.prepare(`
+    SELECT h.code, h.label,
+      SUM(CASE WHEN date(hal.accessed_at) = date('now') THEN 1 ELSE 0 END) as accesses_today,
+      COUNT(hal.id) as total_accesses
+    FROM hubs h
+    LEFT JOIN hub_access_log hal ON hal.hub_id = h.id
+    WHERE h.school_id = ?
+    GROUP BY h.id ORDER BY accesses_today DESC, total_accesses DESC
+  `).all(schoolId) as SchoolWideStats['hub_table'];
+  const teacher_leaderboard = db.prepare(`
+    SELECT u.name, COUNT(hal.id) as accesses_today
+    FROM hub_access_log hal
+    JOIN hubs h ON h.id = hal.hub_id
+    JOIN users u ON u.id = h.user_id
+    WHERE h.school_id = ? AND date(hal.accessed_at) = date('now')
+    GROUP BY u.id ORDER BY accesses_today DESC LIMIT 5
+  `).all(schoolId) as SchoolWideStats['teacher_leaderboard'];
+  return { total_hubs, accesses_today, form_submissions_today, most_accessed_hub_today, hub_table, teacher_leaderboard };
 }

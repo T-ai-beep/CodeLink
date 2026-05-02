@@ -3,11 +3,18 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
-  getDb, getHubWithLinks, isHubExpired,
+  getDb, getHubWithLinks, isHubExpired, getHubByCode,
   getFormByHubId, getFormWithFields, saveFormResponse,
   getFilesByHubId, getFileByStoredName,
+  logHubAccess, logLinkClick,
 } from './db';
 import type { HubWithLinks, FormWithFields, HubFile } from './db';
+
+function parseDeviceHint(ua: string): 'mobile' | 'desktop' | 'unknown' {
+  if (/mobile|android|iphone|ipad|tablet/i.test(ua)) return 'mobile';
+  if (ua.trim() !== '') return 'desktop';
+  return 'unknown';
+}
 
 const UPLOAD_DIR = path.join(os.homedir(), '.lode', 'uploads');
 
@@ -108,7 +115,7 @@ function renderActive(
   const linkItems = hub.links
     .map(
       (l) =>
-        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}">${esc(l.title)}</a>`
+        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}&from=${encodeURIComponent(hub.code)}">${esc(l.title)}</a>`
     )
     .join('\n');
 
@@ -436,6 +443,13 @@ app.get('/c/:code', (req, res) => {
     const fw = form ? (getFormWithFields(db, form.id) ?? null) : null;
     const files = getFilesByHubId(db, hub.id);
     res.status(200).send(renderActive(hub, fw, new Map(), files));
+    const hubId = hub.id;
+    const deviceHint = parseDeviceHint(req.headers['user-agent'] ?? '');
+    setImmediate(() => {
+      let logDb;
+      try { logDb = getDb(); logHubAccess(logDb, hubId, deviceHint); }
+      catch { /* ignore */ } finally { if (logDb) logDb.close(); }
+    });
   } catch (err) {
     res.status(500).send(renderNotFound('error'));
   } finally {
@@ -593,6 +607,7 @@ app.get('/c/:code/thanks', (req, res) => {
 
 app.get('/leave', (req, res) => {
   const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
+  const fromCode = typeof req.query.from === 'string' ? req.query.from.trim().toUpperCase() : '';
   let valid = false;
   try { new URL(rawUrl); valid = true; } catch { valid = false; }
   if (!valid || !rawUrl) {
@@ -600,6 +615,16 @@ app.get('/leave', (req, res) => {
     return;
   }
   res.status(200).send(renderLeave(rawUrl));
+  if (fromCode) {
+    setImmediate(() => {
+      let logDb;
+      try {
+        logDb = getDb();
+        const hub = getHubByCode(logDb, fromCode);
+        if (hub) logLinkClick(logDb, hub.id, rawUrl);
+      } catch { /* ignore */ } finally { if (logDb) logDb.close(); }
+    });
+  }
 });
 
 app.get('/files/:storedName', (req, res) => {
