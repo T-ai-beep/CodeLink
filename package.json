@@ -10,7 +10,8 @@
     "build": "tsc",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
-    "server": "node dist/server.js"
+    "server": "node dist/server.js",
+    "teacher": "node dist/teacher.js"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",

@@ -38,12 +38,63 @@ export interface NewLink {
   url: string;
 }
 
+export type FieldType = 'short_text' | 'long_text' | 'multiple_choice' | 'checkbox';
+
+export interface Form {
+  id: number;
+  hub_id: number;
+  title: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FormField {
+  id: number;
+  form_id: number;
+  label: string;
+  type: FieldType;
+  required: number;
+  options: string | null;
+  order_index: number;
+}
+
+export interface FormWithFields extends Form {
+  fields: FormField[];
+}
+
+export interface FormResponse {
+  id: number;
+  form_id: number;
+  submitted_at: string;
+}
+
+export interface FormAnswer {
+  id: number;
+  response_id: number;
+  field_id: number;
+  value: string;
+}
+
+export interface FormResponseWithAnswers extends FormResponse {
+  answers: FormAnswer[];
+}
+
+export interface NewFormField {
+  label: string;
+  type: FieldType;
+  required: boolean;
+  options: string[] | null;
+  order_index: number;
+}
+
 function openDb(): Database.Database {
   if (!fs.existsSync(DB_DIR)) {
     fs.mkdirSync(DB_DIR, { recursive: true });
   }
   const db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
   return db;
 }
 
@@ -63,6 +114,38 @@ function initSchema(db: Database.Database): void {
       title       TEXT    NOT NULL,
       url         TEXT    NOT NULL,
       order_index INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS forms (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      hub_id      INTEGER NOT NULL REFERENCES hubs(id) ON DELETE CASCADE,
+      title       TEXT    NOT NULL,
+      description TEXT    NULL,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS form_fields (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      form_id     INTEGER NOT NULL REFERENCES forms(id) ON DELETE CASCADE,
+      label       TEXT    NOT NULL,
+      type        TEXT    NOT NULL,
+      required    INTEGER NOT NULL DEFAULT 0,
+      options     TEXT    NULL,
+      order_index INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS form_responses (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      form_id      INTEGER NOT NULL REFERENCES forms(id) ON DELETE CASCADE,
+      submitted_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS form_answers (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      response_id INTEGER NOT NULL REFERENCES form_responses(id) ON DELETE CASCADE,
+      field_id    INTEGER NOT NULL REFERENCES form_fields(id) ON DELETE CASCADE,
+      value       TEXT    NOT NULL DEFAULT ''
     );
   `);
 }
@@ -188,4 +271,140 @@ export function isHubExpired(hub: Hub): boolean {
 
 export function deleteHub(db: Database.Database, hubId: number): void {
   db.prepare('DELETE FROM hubs WHERE id = ?').run(hubId);
+}
+
+export function createForm(
+  db: Database.Database,
+  hubId: number,
+  title: string,
+  description: string | null,
+  fields: NewFormField[]
+): Form {
+  const insertForm = db.prepare(`
+    INSERT INTO forms (hub_id, title, description, created_at, updated_at)
+    VALUES (?, ?, ?, datetime('now'), datetime('now'))
+  `);
+  const insertField = db.prepare(`
+    INSERT INTO form_fields (form_id, label, type, required, options, order_index)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const tx = db.transaction(() => {
+    const result = insertForm.run(hubId, title, description);
+    const formId = result.lastInsertRowid as number;
+    fields.forEach((f, idx) => {
+      insertField.run(
+        formId, f.label, f.type, f.required ? 1 : 0,
+        f.options ? JSON.stringify(f.options) : null,
+        idx
+      );
+    });
+    return db.prepare('SELECT * FROM forms WHERE id = ?').get(formId) as Form;
+  });
+  return tx();
+}
+
+export function getFormByHubId(db: Database.Database, hubId: number): Form | undefined {
+  return db.prepare('SELECT * FROM forms WHERE hub_id = ?').get(hubId) as Form | undefined;
+}
+
+export function getFormWithFields(db: Database.Database, formId: number): FormWithFields | undefined {
+  const form = db.prepare('SELECT * FROM forms WHERE id = ?').get(formId) as Form | undefined;
+  if (!form) return undefined;
+  const fields = db
+    .prepare('SELECT * FROM form_fields WHERE form_id = ? ORDER BY order_index ASC')
+    .all(formId) as FormField[];
+  return { ...form, fields };
+}
+
+export function updateForm(
+  db: Database.Database,
+  formId: number,
+  title: string,
+  description: string | null,
+  fields: NewFormField[]
+): void {
+  const updateFormStmt = db.prepare(
+    `UPDATE forms SET title = ?, description = ?, updated_at = datetime('now') WHERE id = ?`
+  );
+  const deleteFields = db.prepare('DELETE FROM form_fields WHERE form_id = ?');
+  const insertField = db.prepare(`
+    INSERT INTO form_fields (form_id, label, type, required, options, order_index)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const tx = db.transaction(() => {
+    updateFormStmt.run(title, description, formId);
+    deleteFields.run(formId);
+    fields.forEach((f, idx) => {
+      insertField.run(
+        formId, f.label, f.type, f.required ? 1 : 0,
+        f.options ? JSON.stringify(f.options) : null,
+        idx
+      );
+    });
+  });
+  tx();
+}
+
+export function deleteForm(db: Database.Database, formId: number): void {
+  db.prepare('DELETE FROM forms WHERE id = ?').run(formId);
+}
+
+export function deleteFormFields(db: Database.Database, formId: number): void {
+  db.prepare('DELETE FROM form_fields WHERE form_id = ?').run(formId);
+}
+
+export function saveFormResponse(
+  db: Database.Database,
+  formId: number,
+  answers: Array<{ fieldId: number; value: string }>
+): void {
+  const insertResp = db.prepare(
+    `INSERT INTO form_responses (form_id, submitted_at) VALUES (?, datetime('now'))`
+  );
+  const insertAnswer = db.prepare(
+    `INSERT INTO form_answers (response_id, field_id, value) VALUES (?, ?, ?)`
+  );
+  const tx = db.transaction(() => {
+    const result = insertResp.run(formId);
+    const responseId = result.lastInsertRowid as number;
+    answers.forEach((a) => insertAnswer.run(responseId, a.fieldId, a.value));
+  });
+  tx();
+}
+
+export function getFormResponses(db: Database.Database, formId: number): FormResponse[] {
+  return db
+    .prepare('SELECT * FROM form_responses WHERE form_id = ? ORDER BY submitted_at ASC')
+    .all(formId) as FormResponse[];
+}
+
+export function getFormResponsesWithAnswers(
+  db: Database.Database,
+  formId: number
+): FormResponseWithAnswers[] {
+  const responses = getFormResponses(db, formId);
+  return responses.map((r) => {
+    const answers = db
+      .prepare('SELECT * FROM form_answers WHERE response_id = ?')
+      .all(r.id) as FormAnswer[];
+    return { ...r, answers };
+  });
+}
+
+export function getResponseCount(db: Database.Database, formId: number): number {
+  const row = db
+    .prepare('SELECT COUNT(*) as count FROM form_responses WHERE form_id = ?')
+    .get(formId) as { count: number };
+  return row.count;
+}
+
+export function addFormField(db: Database.Database, formId: number, field: NewFormField): void {
+  db.prepare(`
+    INSERT INTO form_fields (form_id, label, type, required, options, order_index)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(
+    formId, field.label, field.type, field.required ? 1 : 0,
+    field.options ? JSON.stringify(field.options) : null,
+    field.order_index
+  );
 }
