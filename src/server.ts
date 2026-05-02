@@ -5,8 +5,12 @@ import os from 'os';
 import {
   getDb, getHubWithLinks, isHubExpired, getHubByCode,
   getFormByHubId, getFormWithFields, saveFormResponse,
+<<<<<<< HEAD
   getFilesByHubId, getFileByStoredName,
   logHubAccess, logLinkClick,
+=======
+  getSchool, logHubAccess,
+>>>>>>> 599fb6f (Implement authentication and authorization features for teacher dashboard)
 } from './db';
 import type { HubWithLinks, FormWithFields, HubFile } from './db';
 
@@ -56,7 +60,8 @@ const BASE_STYLES = `
 function renderFormSection(
   hub: HubWithLinks,
   form: FormWithFields,
-  errors: Map<number, string>
+  errors: Map<number, string>,
+  primaryColor = '#111111'
 ): string {
   const fields = form.fields.map((field) => {
     const err = errors.get(field.id);
@@ -101,7 +106,7 @@ function renderFormSection(
   ${form.description ? `<p class="form-desc">${esc(form.description)}</p>` : ''}
   <form method="POST" action="/c/${esc(hub.code)}/submit">
     ${fields}
-    <button type="submit" class="submit-btn">Submit</button>
+    <button type="submit" class="submit-btn" style="background:${esc(primaryColor)}">Submit</button>
   </form>
 </div>`;
 }
@@ -110,12 +115,21 @@ function renderActive(
   hub: HubWithLinks,
   form: FormWithFields | null = null,
   errors: Map<number, string> = new Map(),
+<<<<<<< HEAD
   files: HubFile[] = []
+=======
+  broadcastMsg: string | null = null,
+  primaryColor = '#111111'
+>>>>>>> 599fb6f (Implement authentication and authorization features for teacher dashboard)
 ): string {
   const linkItems = hub.links
     .map(
       (l) =>
+<<<<<<< HEAD
         `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}&from=${encodeURIComponent(hub.code)}">${esc(l.title)}</a>`
+=======
+        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}" style="background:${esc(primaryColor)}">${esc(l.title)}</a>`
+>>>>>>> 599fb6f (Implement authentication and authorization features for teacher dashboard)
     )
     .join('\n');
 
@@ -211,10 +225,12 @@ function renderActive(
   </style>
 </head>
 <body>
+  ${broadcastMsg ? `<div style="background:#dc2626;color:#fff;padding:12px 20px;text-align:center;font-size:.9rem;font-weight:600;margin-top:-32px;margin-left:-20px;margin-right:-20px;margin-bottom:24px">${esc(broadcastMsg)}</div>` : ''}
   <h1>${esc(hub.label)}</h1>
   <div class="links">
 ${hub.links.length > 0 ? linkItems : '    <p class="no-links">No links have been added to this hub yet.</p>'}
   </div>
+<<<<<<< HEAD
   ${files.length > 0 ? `
   <div class="files-wrap">
     <h2 class="files-title">Files</h2>
@@ -225,6 +241,9 @@ ${hub.links.length > 0 ? linkItems : '    <p class="no-links">No links have been
     </a>`).join('')}
   </div>` : ''}
   ${form ? renderFormSection(hub, form, errors) : ''}
+=======
+  ${form ? renderFormSection(hub, form, errors, primaryColor) : ''}
+>>>>>>> 599fb6f (Implement authentication and authorization features for teacher dashboard)
 </body>
 </html>`;
 }
@@ -434,13 +453,25 @@ app.get('/c/:code', (req, res) => {
       return;
     }
 
+    if (hub.archived) {
+      res.status(200).send(renderExpired({ ...hub, fallback_msg: hub.fallback_msg ?? 'This hub has been archived.' }));
+      return;
+    }
+
     if (isHubExpired(hub)) {
       res.status(200).send(renderExpired(hub));
       return;
     }
 
+    logHubAccess(db, hub.id);
+
+    const school = getSchool(db);
+    const broadcastMsg = school?.broadcast_msg ?? null;
+    const primaryColor = school?.primary_color ?? '#111111';
+
     const form = getFormByHubId(db, hub.id);
     const fw = form ? (getFormWithFields(db, form.id) ?? null) : null;
+<<<<<<< HEAD
     const files = getFilesByHubId(db, hub.id);
     res.status(200).send(renderActive(hub, fw, new Map(), files));
     const hubId = hub.id;
@@ -450,6 +481,9 @@ app.get('/c/:code', (req, res) => {
       try { logDb = getDb(); logHubAccess(logDb, hubId, deviceHint); }
       catch { /* ignore */ } finally { if (logDb) logDb.close(); }
     });
+=======
+    res.status(200).send(renderActive(hub, fw, new Map(), broadcastMsg, primaryColor));
+>>>>>>> 599fb6f (Implement authentication and authorization features for teacher dashboard)
   } catch (err) {
     res.status(500).send(renderNotFound('error'));
   } finally {
@@ -574,7 +608,8 @@ app.post('/c/:code/submit', (req, res) => {
     }
 
     if (errors.size > 0) {
-      res.status(200).send(renderActive(hub, fw, errors));
+      const school2 = getSchool(db);
+      res.status(200).send(renderActive(hub, fw, errors, school2?.broadcast_msg ?? null, school2?.primary_color ?? '#111111'));
       return;
     }
 
