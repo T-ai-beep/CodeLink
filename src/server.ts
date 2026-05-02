@@ -1,9 +1,30 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import {
   getDb, getHubWithLinks, isHubExpired,
   getFormByHubId, getFormWithFields, saveFormResponse,
+  getFilesByHubId, getFileByStoredName,
 } from './db';
-import type { HubWithLinks, FormWithFields } from './db';
+import type { HubWithLinks, FormWithFields, HubFile } from './db';
+
+const UPLOAD_DIR = path.join(os.homedir(), '.lode', 'uploads');
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileTypeLabel(mimetype: string): string {
+  if (mimetype === 'application/pdf') return '[PDF]';
+  if (mimetype.startsWith('image/')) return '[IMG]';
+  if (mimetype.includes('word')) return '[DOC]';
+  if (mimetype.includes('excel') || mimetype.includes('spreadsheet')) return '[XLS]';
+  if (mimetype.includes('powerpoint') || mimetype.includes('presentation')) return '[PPT]';
+  return '[FILE]';
+}
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
@@ -81,7 +102,8 @@ function renderFormSection(
 function renderActive(
   hub: HubWithLinks,
   form: FormWithFields | null = null,
-  errors: Map<number, string> = new Map()
+  errors: Map<number, string> = new Map(),
+  files: HubFile[] = []
 ): string {
   const linkItems = hub.links
     .map(
@@ -162,6 +184,23 @@ function renderActive(
       font-size: 1rem; font-family: inherit;
       font-weight: 600; margin-top: 24px; cursor: pointer;
     }
+    .files-wrap {
+      margin-top: 36px; padding-top: 28px;
+      border-top: 2px solid #e5e7eb;
+    }
+    h2.files-title { font-size: 1.2rem; font-weight: 700; margin-bottom: 16px; }
+    a.file-btn {
+      display: flex; align-items: center; gap: 12px;
+      background: #f3f4f6; color: #111; text-decoration: none;
+      padding: 14px 18px; border-radius: 8px; margin-bottom: 10px;
+      font-size: 0.9rem;
+    }
+    .file-type-badge {
+      font-size: 0.72rem; font-weight: 700; font-family: monospace;
+      background: #e5e7eb; padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+    }
+    .file-name { flex: 1; font-weight: 500; }
+    .file-size { font-size: 0.8rem; color: #888; flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -169,6 +208,15 @@ function renderActive(
   <div class="links">
 ${hub.links.length > 0 ? linkItems : '    <p class="no-links">No links have been added to this hub yet.</p>'}
   </div>
+  ${files.length > 0 ? `
+  <div class="files-wrap">
+    <h2 class="files-title">Files</h2>
+    ${files.map((f) => `<a class="file-btn" href="/files/${f.stored_name}">
+      <span class="file-type-badge">${fileTypeLabel(f.mimetype)}</span>
+      <span class="file-name">${esc(f.filename)}</span>
+      <span class="file-size">${formatSize(f.size)}</span>
+    </a>`).join('')}
+  </div>` : ''}
   ${form ? renderFormSection(hub, form, errors) : ''}
 </body>
 </html>`;
@@ -386,7 +434,8 @@ app.get('/c/:code', (req, res) => {
 
     const form = getFormByHubId(db, hub.id);
     const fw = form ? (getFormWithFields(db, form.id) ?? null) : null;
-    res.status(200).send(renderActive(hub, fw));
+    const files = getFilesByHubId(db, hub.id);
+    res.status(200).send(renderActive(hub, fw, new Map(), files));
   } catch (err) {
     res.status(500).send(renderNotFound('error'));
   } finally {
@@ -551,6 +600,24 @@ app.get('/leave', (req, res) => {
     return;
   }
   res.status(200).send(renderLeave(rawUrl));
+});
+
+app.get('/files/:storedName', (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const file = getFileByStoredName(db, req.params.storedName);
+    if (!file) { res.status(404).send('File not found.'); return; }
+    const filePath = path.join(UPLOAD_DIR, file.stored_name);
+    if (!fs.existsSync(filePath)) { res.status(404).send('File not found.'); return; }
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename.replace(/"/g, '_')}"`);
+    res.sendFile(filePath);
+  } catch {
+    res.status(500).send('Error serving file.');
+  } finally {
+    if (db) db.close();
+  }
 });
 
 app.listen(PORT, () => {

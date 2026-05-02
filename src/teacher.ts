@@ -1,11 +1,18 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
+import QRCode from 'qrcode';
+import multer from 'multer';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import {
   getDb, getAllHubs, getFormByHubId, getFormWithFields,
   createForm, updateForm, deleteForm,
   getFormResponsesWithAnswers, getResponseCount,
+  addFile, getFilesByHubId, getFileById, getFileByStoredName, deleteFile,
 } from './db';
-import type { Hub, FormField, FieldType, NewFormField } from './db';
+import type { Hub, FormField, FieldType, NewFormField, HubFile } from './db';
 import authRouter from './auth';
 import { attachUser, requireTeacher } from './middleware/auth';
 
@@ -64,6 +71,81 @@ function parseFields(raw: unknown): NewFormField[] {
         order_index: idx,
       };
     });
+}
+
+// ─── file upload setup ───────────────────────────────────────────────────────
+
+const UPLOAD_DIR = path.join(os.homedir(), '.lode', 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const ALLOWED_MIMETYPES = new Set([
+  'application/pdf',
+  'image/png', 'image/jpeg', 'image/gif',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+]);
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (_req, _file, cb) => cb(null, crypto.randomUUID()),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    ALLOWED_MIMETYPES.has(file.mimetype) ? cb(null, true) : cb(new Error('File type not allowed'));
+  },
+});
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileTypeLabel(mimetype: string): string {
+  if (mimetype === 'application/pdf') return '[PDF]';
+  if (mimetype.startsWith('image/')) return '[IMG]';
+  if (mimetype.includes('word')) return '[DOC]';
+  if (mimetype.includes('excel') || mimetype.includes('spreadsheet')) return '[XLS]';
+  if (mimetype.includes('powerpoint') || mimetype.includes('presentation')) return '[PPT]';
+  return '[FILE]';
+}
+
+function renderPrintSheet(hub: Hub, svgString: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${esc(hub.code)} — Lode QR</title>
+  <style>
+    @page { margin: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; padding: 48px; text-align: center;
+    }
+    .qr-wrap { width: 280px; margin-bottom: 28px; }
+    .qr-wrap svg { width: 100%; height: auto; display: block; }
+    .hub-label { font-size: 1.5rem; font-weight: 700; color: #111; margin-bottom: 8px; }
+    .domain { font-size: 1rem; color: #888; margin-bottom: 14px; }
+    .hub-code { font-size: 3rem; font-weight: 800; letter-spacing: 0.12em; color: #111; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <div class="qr-wrap">${svgString}</div>
+  <div class="hub-label">${esc(hub.label)}</div>
+  <div class="domain">getlode.xyz</div>
+  <div class="hub-code">${esc(hub.code)}</div>
+</body>
+</html>`;
 }
 
 // ─── layout & shared CSS ─────────────────────────────────────────────────────
@@ -371,7 +453,7 @@ app.get('/', (_req, res) => {
   }
 });
 
-app.get('/hubs/:hubId/forms', (req, res) => {
+app.get('/hubs/:hubId/forms', async (req, res) => {
   let db;
   try {
     db = getDb();
@@ -382,12 +464,30 @@ app.get('/hubs/:hubId/forms', (req, res) => {
       return;
     }
     const form = getFormByHubId(db, hubId);
+    const files = getFilesByHubId(db, hubId);
+    const qrUrl = `https://glode.xyz/c/${hub.code}`;
+    const qrSvg = await QRCode.toString(qrUrl, { type: 'svg' });
+
     let body = `<a href="/" class="back-link">&#x2190; Back to Hubs</a>
-      <h1>${esc(hub.code)} &mdash; ${esc(hub.label)}</h1>`;
+      <h1>${esc(hub.code)} &mdash; ${esc(hub.label)}</h1>
+      <div class="card">
+        <h2>QR Code</h2>
+        <p class="muted" style="margin-bottom:16px">Scans to <code>https://glode.xyz/c/${esc(hub.code)}</code></p>
+        <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
+          <div style="width:180px;flex-shrink:0">${qrSvg}</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <a href="/hubs/${hubId}/qr/download" class="btn btn-secondary">Download QR</a>
+            <a href="/hubs/${hubId}/qr/print" class="btn btn-secondary" target="_blank">Print Sheet</a>
+          </div>
+        </div>
+      </div>`;
 
     if (!form) {
-      body += `<p class="muted" style="margin-bottom:14px">No form attached to this hub.</p>
-        <a href="/hubs/${hubId}/forms/new" class="btn btn-primary">+ Create Form</a>`;
+      body += `<div class="card">
+        <h2>Form</h2>
+        <p class="muted" style="margin-bottom:14px">No form attached to this hub.</p>
+        <a href="/hubs/${hubId}/forms/new" class="btn btn-primary">+ Create Form</a>
+      </div>`;
     } else {
       const fw = getFormWithFields(db, form.id);
       const count = getResponseCount(db, form.id);
@@ -410,7 +510,37 @@ app.get('/hubs/:hubId/forms', (req, res) => {
           : '<p class="muted">No fields defined.</p>'}
       </div>`;
     }
-    res.send(layout('Forms', body));
+
+    const fileRows = files.map((f: HubFile) => `<tr>
+      <td>${esc(f.filename)}</td>
+      <td>${formatSize(f.size)}</td>
+      <td style="font-family:monospace;font-size:.78rem">${esc(f.mimetype)}</td>
+      <td class="muted">${esc(f.created_at)}</td>
+      <td>
+        <a href="/files/${esc(f.stored_name)}" class="btn btn-secondary">Download</a>
+        <form method="POST" action="/hubs/${hubId}/files/${f.id}/delete" style="display:inline">
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>
+      </td>
+    </tr>`).join('');
+
+    body += `<div class="card">
+      <div class="abar" style="margin-bottom:12px">
+        <h2 style="margin:0">Files (${files.length})</h2>
+      </div>
+      ${files.length > 0
+        ? `<table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Uploaded</th><th></th></tr></thead><tbody>${fileRows}</tbody></table>`
+        : '<p class="muted" style="margin-bottom:12px">No files uploaded.</p>'}
+      <form method="POST" action="/hubs/${hubId}/files" enctype="multipart/form-data"
+        style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" name="file"
+          accept=".pdf,.png,.jpg,.jpeg,.gif,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+          style="font-size:.84rem;flex:1;min-width:200px">
+        <button type="submit" class="btn btn-primary">Upload File</button>
+      </form>
+    </div>`;
+
+    res.send(layout('Hub', body));
   } catch (err) {
     res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
   } finally {
@@ -572,6 +702,102 @@ app.get('/hubs/:hubId/forms/:id/responses/export', (req, res) => {
     res.send(csv);
   } catch (err) {
     res.status(500).send('Error: ' + String(err));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── qr routes ───────────────────────────────────────────────────────────────
+
+app.get('/hubs/:hubId/qr/download', async (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.hubId, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (!hub) { res.status(404).send('Hub not found.'); return; }
+    const buf = await QRCode.toBuffer(`https://glode.xyz/c/${hub.code}`, { type: 'png', width: 600 });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Disposition', `attachment; filename="lode-${hub.code.toLowerCase()}-qr.png"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(500).send('Error generating QR code: ' + String(err));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/hubs/:hubId/qr/print', async (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.hubId, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (!hub) { res.status(404).send('Hub not found.'); return; }
+    const svg = await QRCode.toString(`https://glode.xyz/c/${hub.code}`, { type: 'svg' });
+    res.send(renderPrintSheet(hub, svg));
+  } catch (err) {
+    res.status(500).send('Error generating print sheet: ' + String(err));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── file routes ─────────────────────────────────────────────────────────────
+
+app.post('/hubs/:hubId/files', (req, res) => {
+  const hubId = parseInt(req.params.hubId, 10);
+  upload.single('file')(req, res, (err) => {
+    if (err || !req.file) {
+      res.redirect(302, `/hubs/${hubId}/forms`);
+      return;
+    }
+    let db;
+    try {
+      db = getDb();
+      addFile(db, hubId, req.user?.id ?? null, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size);
+      res.redirect(302, `/hubs/${hubId}/forms`);
+    } catch {
+      fs.unlink(req.file!.path, () => {});
+      res.redirect(302, `/hubs/${hubId}/forms`);
+    } finally {
+      if (db) db.close();
+    }
+  });
+});
+
+app.post('/hubs/:hubId/files/:fileId/delete', (req, res) => {
+  const hubId = parseInt(req.params.hubId, 10);
+  const fileId = parseInt(req.params.fileId, 10);
+  let db;
+  try {
+    db = getDb();
+    const file = getFileById(db, fileId);
+    if (file) {
+      fs.unlink(path.join(UPLOAD_DIR, file.stored_name), () => {});
+      deleteFile(db, fileId);
+    }
+    res.redirect(302, `/hubs/${hubId}/forms`);
+  } catch {
+    res.redirect(302, `/hubs/${hubId}/forms`);
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/files/:storedName', (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const file = getFileByStoredName(db, req.params.storedName);
+    if (!file) { res.status(404).send('File not found.'); return; }
+    const filePath = path.join(UPLOAD_DIR, file.stored_name);
+    if (!fs.existsSync(filePath)) { res.status(404).send('File not found.'); return; }
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename.replace(/"/g, '_')}"`);
+    res.sendFile(filePath);
+  } catch {
+    res.status(500).send('Error serving file.');
   } finally {
     if (db) db.close();
   }

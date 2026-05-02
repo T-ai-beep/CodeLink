@@ -123,6 +123,17 @@ export interface NewFormField {
   order_index: number;
 }
 
+export interface HubFile {
+  id: number;
+  hub_id: number;
+  user_id: number | null;
+  filename: string;
+  stored_name: string;
+  mimetype: string;
+  size: number;
+  created_at: string;
+}
+
 function openDb(): Database.Database {
   if (!fs.existsSync(DB_DIR)) {
     fs.mkdirSync(DB_DIR, { recursive: true });
@@ -208,6 +219,17 @@ function initSchema(db: Database.Database): void {
       user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at TEXT    NOT NULL DEFAULT (datetime('now')),
       expires_at TEXT    NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS files (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      hub_id      INTEGER NOT NULL REFERENCES hubs(id) ON DELETE CASCADE,
+      user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      filename    TEXT    NOT NULL,
+      stored_name TEXT    NOT NULL,
+      mimetype    TEXT    NOT NULL,
+      size        INTEGER NOT NULL,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     );
   `);
 }
@@ -576,4 +598,37 @@ export function getSession(db: Database.Database, sessionId: string): User | und
 
 export function deleteSession(db: Database.Database, sessionId: string): void {
   db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+}
+
+// ─── files ────────────────────────────────────────────────────────────────────
+
+export function addFile(
+  db: Database.Database,
+  hubId: number,
+  userId: number | null,
+  filename: string,
+  storedName: string,
+  mimetype: string,
+  size: number
+): HubFile {
+  const result = db.prepare(
+    `INSERT INTO files (hub_id, user_id, filename, stored_name, mimetype, size) VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(hubId, userId, filename, storedName, mimetype, size);
+  return db.prepare('SELECT * FROM files WHERE id = ?').get(result.lastInsertRowid) as HubFile;
+}
+
+export function getFilesByHubId(db: Database.Database, hubId: number): HubFile[] {
+  return db.prepare('SELECT * FROM files WHERE hub_id = ? ORDER BY created_at ASC').all(hubId) as HubFile[];
+}
+
+export function getFileById(db: Database.Database, id: number): HubFile | undefined {
+  return db.prepare('SELECT * FROM files WHERE id = ?').get(id) as HubFile | undefined;
+}
+
+export function getFileByStoredName(db: Database.Database, storedName: string): HubFile | undefined {
+  return db.prepare('SELECT * FROM files WHERE stored_name = ?').get(storedName) as HubFile | undefined;
+}
+
+export function deleteFile(db: Database.Database, id: number): void {
+  db.prepare('DELETE FROM files WHERE id = ?').run(id);
 }

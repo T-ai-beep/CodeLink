@@ -14,6 +14,8 @@
     "teacher": "node dist/teacher.js"
   },
   "dependencies": {
+    "@types/multer": "^2.1.0",
+    "@types/qrcode": "^1.5.6",
     "bcrypt": "^6.0.0",
     "better-sqlite3": "^9.4.3",
     "chalk": "^4.1.2",
@@ -21,7 +23,9 @@
     "cookie-parser": "^1.4.7",
     "express": "^4.18.3",
     "inquirer": "^8.2.6",
-    "ora": "^5.4.1"
+    "multer": "^2.1.1",
+    "ora": "^5.4.1",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
