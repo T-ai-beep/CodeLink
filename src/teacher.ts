@@ -33,6 +33,7 @@ function toCsv(headers: string[], rows: string[][]): string {
 
 const VALID_TYPES = new Set<string>([
   'short_text', 'long_text', 'multiple_choice', 'checkbox',
+  'dropdown', 'date', 'name', 'email', 'number', 'phone',
 ]);
 
 function parseFields(raw: unknown): NewFormField[] {
@@ -45,7 +46,7 @@ function parseFields(raw: unknown): NewFormField[] {
     .filter((f) => f.label && f.label.trim())
     .map((f, idx) => {
       const type = (VALID_TYPES.has(f.type ?? '') ? f.type : 'short_text') as FieldType;
-      const hasOptions = type === 'multiple_choice' || type === 'checkbox';
+      const hasOptions = type === 'multiple_choice' || type === 'checkbox' || type === 'dropdown';
       return {
         label: (f.label ?? '').trim(),
         type,
@@ -166,6 +167,7 @@ function layout(title: string, content: string): string {
 function renderFieldPreview(fields: FormField[]): string {
   const icons: Record<string, string> = {
     short_text: '—', long_text: '≡', multiple_choice: '◉', checkbox: '☑',
+    dropdown: '▾', date: '◻', name: 'Aa', email: '@', number: '#', phone: '℡',
   };
   return fields.map((f) => {
     const opts = f.options ? (JSON.parse(f.options) as string[]) : [];
@@ -197,8 +199,8 @@ function formBuilderPage(
   const fieldRows = initFields.map((f, idx) => {
     const opts = f.options ? (JSON.parse(f.options) as string[]).join('\n') : '';
     const showOpts =
-      f.type === 'multiple_choice' || f.type === 'checkbox' ? '' : 'display:none';
-    const allTypes = ['short_text', 'long_text', 'multiple_choice', 'checkbox'];
+      f.type === 'multiple_choice' || f.type === 'checkbox' || f.type === 'dropdown' ? '' : 'display:none';
+    const allTypes = ['short_text', 'long_text', 'multiple_choice', 'checkbox', 'dropdown', 'date', 'name', 'email', 'number', 'phone'];
     const typeOpts = allTypes
       .map(
         (t) =>
@@ -247,11 +249,11 @@ function formBuilderPage(
     var fieldCount = ${startCount};
 
     function buildFieldRow(idx, label, type, required, options) {
-      var types = ['short_text','long_text','multiple_choice','checkbox'];
+      var types = ['short_text','long_text','multiple_choice','checkbox','dropdown','date','name','email','number','phone'];
       var typeOpts = types.map(function(t) {
         return '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t.replace(/_/g,' ') + '</option>';
       }).join('');
-      var showOpts = (type === 'multiple_choice' || type === 'checkbox') ? '' : 'display:none';
+      var showOpts = (type === 'multiple_choice' || type === 'checkbox' || type === 'dropdown') ? '' : 'display:none';
       return '<div class="frow-header">' +
         '<input type="text" name="fields[' + idx + '][label]" placeholder="Field label" value="' + label + '" required>' +
         '<select name="fields[' + idx + '][type]" onchange="onTypeChange(this,' + idx + ')">' + typeOpts + '</select>' +
@@ -294,7 +296,7 @@ function formBuilderPage(
 
     function onTypeChange(sel, idx) {
       var d = document.getElementById('opts-' + idx);
-      d.style.display = (sel.value === 'multiple_choice' || sel.value === 'checkbox') ? '' : 'none';
+      d.style.display = (sel.value === 'multiple_choice' || sel.value === 'checkbox' || sel.value === 'dropdown') ? '' : 'none';
     }
 
     document.getElementById('form-builder').addEventListener('submit', function() {

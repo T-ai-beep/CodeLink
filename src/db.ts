@@ -38,7 +38,7 @@ export interface NewLink {
   url: string;
 }
 
-export type FieldType = 'short_text' | 'long_text' | 'multiple_choice' | 'checkbox';
+export type FieldType = 'short_text' | 'long_text' | 'multiple_choice' | 'checkbox' | 'dropdown' | 'date' | 'name' | 'email' | 'number' | 'phone';
 
 export interface Form {
   id: number;

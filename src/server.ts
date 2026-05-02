@@ -36,19 +36,32 @@ function renderFormSection(
       ? `<div class="f-error">${esc(err)}</div>`
       : '';
     const req = field.required ? ' <span class="f-req">*</span>' : '';
+    const reqAttr = field.required ? ' required' : '';
+    const errCls = err ? ' inp-err' : '';
     let input = '';
     if (field.type === 'short_text') {
-      input = `<input type="text" name="f_${field.id}" class="${err ? 'inp-err' : ''}">`;
+      input = `<input type="text" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
     } else if (field.type === 'long_text') {
-      input = `<textarea name="f_${field.id}" rows="4" class="${err ? 'inp-err' : ''}"></textarea>`;
+      input = `<textarea name="f_${field.id}" rows="4"${reqAttr} class="${errCls.trim()}"></textarea>`;
+    } else if (field.type === 'dropdown') {
+      const opts: string[] = field.options ? (JSON.parse(field.options) as string[]) : [];
+      const optHtml = opts.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+      input = `<select name="f_${field.id}"${reqAttr} class="${errCls.trim()}"><option value="">— select —</option>${optHtml}</select>`;
+    } else if (field.type === 'date') {
+      input = `<input type="date" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
+    } else if (field.type === 'name') {
+      input = `<div class="name-pair"><input type="text" name="f_${field.id}_first" placeholder="First Name"${reqAttr} class="${errCls.trim()}"><input type="text" name="f_${field.id}_last" placeholder="Last Name"${reqAttr} class="${errCls.trim()}"></div>`;
+    } else if (field.type === 'email') {
+      input = `<input type="email" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
+    } else if (field.type === 'number') {
+      input = `<input type="number" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
+    } else if (field.type === 'phone') {
+      input = `<input type="tel" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
     } else {
       const opts: string[] = field.options ? (JSON.parse(field.options) as string[]) : [];
       const itype = field.type === 'multiple_choice' ? 'radio' : 'checkbox';
       input = opts
-        .map(
-          (o) =>
-            `<label class="opt-label"><input type="${itype}" name="f_${field.id}" value="${esc(o)}"> ${esc(o)}</label>`
-        )
+        .map((o) => `<label class="opt-label"><input type="${itype}" name="f_${field.id}" value="${esc(o)}"> ${esc(o)}</label>`)
         .join('\n');
     }
     return `<div class="f-group">\n  <label class="f-label">${esc(field.label)}${req}</label>\n  ${errHtml}${input}\n</div>`;
@@ -125,7 +138,8 @@ function renderActive(
     .f-label { display: block; font-size: 0.9rem; font-weight: 500; margin-bottom: 6px; }
     .f-req { color: #dc2626; }
     .f-error { color: #dc2626; font-size: 0.82rem; margin-bottom: 4px; }
-    input[type="text"], textarea {
+    input[type="text"], input[type="date"], input[type="email"],
+    input[type="number"], input[type="tel"], select, textarea {
       display: block; width: 100%;
       padding: 12px 14px;
       border: 2px solid #e5e7eb;
@@ -134,6 +148,8 @@ function renderActive(
       font-family: inherit;
       color: #111;
     }
+    .name-pair { display: flex; gap: 12px; }
+    .name-pair input { flex: 1; }
     .inp-err { border-color: #dc2626; }
     .opt-label {
       display: flex; align-items: center; gap: 8px;
@@ -481,10 +497,16 @@ app.post('/c/:code/submit', (req, res) => {
 
     for (const field of fw.fields) {
       if (field.required) {
-        const val = body[`f_${field.id}`];
-        const missing =
-          !val || (Array.isArray(val) ? val.length === 0 : val.trim() === '');
-        if (missing) errors.set(field.id, 'This field is required.');
+        if (field.type === 'name') {
+          const first = ((body[`f_${field.id}_first`] as string) || '').trim();
+          const last = ((body[`f_${field.id}_last`] as string) || '').trim();
+          if (!first || !last) errors.set(field.id, 'This field is required.');
+        } else {
+          const val = body[`f_${field.id}`];
+          const missing =
+            !val || (Array.isArray(val) ? val.length === 0 : val.trim() === '');
+          if (missing) errors.set(field.id, 'This field is required.');
+        }
       }
     }
 
@@ -494,10 +516,16 @@ app.post('/c/:code/submit', (req, res) => {
     }
 
     const answers = fw.fields.map((field) => {
-      const val = body[`f_${field.id}`];
       let value = '';
-      if (Array.isArray(val)) value = val.join(', ');
-      else if (val) value = val.trim();
+      if (field.type === 'name') {
+        const first = ((body[`f_${field.id}_first`] as string) || '').trim();
+        const last = ((body[`f_${field.id}_last`] as string) || '').trim();
+        value = `${first}|${last}`;
+      } else {
+        const val = body[`f_${field.id}`];
+        if (Array.isArray(val)) value = val.join(', ');
+        else if (val) value = val.trim();
+      }
       return { fieldId: field.id, value };
     });
 
