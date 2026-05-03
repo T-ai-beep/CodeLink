@@ -192,8 +192,14 @@ router.post('/setup', async (req, res) => {
     }
     const hash = await bcrypt.hash(password, 10);
     const school = createSchool(db, schoolName, null);
-    createUser(db, school.id, email, hash, 'admin', name);
-    res.redirect(302, '/login');
+    const user = createUser(db, school.id, email, hash, 'admin', name);
+    const sessionId = createSession(db, user.id);
+    res.cookie(SESSION_COOKIE, sessionId, {
+      httpOnly: true,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    res.redirect(302, '/onboarding');
   } catch (err) {
     res.send(renderSetup('An error occurred: ' + esc(String(err))));
   } finally {

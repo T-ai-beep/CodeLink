@@ -11,7 +11,8 @@
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
     "server": "node dist/server.js",
-    "teacher": "node dist/teacher.js"
+    "teacher": "node dist/teacher.js",
+    "seed": "node dist/seed.js"
   },
   "dependencies": {
     "@types/multer": "^2.1.0",

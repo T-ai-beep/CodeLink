@@ -2,19 +2,22 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import QRCode from 'qrcode';
 import multer from 'multer';
+import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import {
   getDb, getAllHubs, getFormByHubId, getFormWithFields,
-  createForm, updateForm, deleteForm,
+  createForm, updateForm, deleteForm, deleteHub,
   getFormResponsesWithAnswers, getResponseCount,
   addFile, getFilesByHubId, getFileById, getFileByStoredName, deleteFile,
   getHubAccessStats, getLinkClickStats, getFormSubmissionRate,
   getHubAccessByDay, getSchoolWideStats,
+  getUsersBySchool, updateUserRole, deleteUser, createUser,
+  getSchoolById, updateSchoolProfile, updateSchoolBroadcast, setHubStatus, getRecentActivity,
 } from './db';
-import type { Hub, FormField, FieldType, NewFormField, HubFile } from './db';
+import type { Hub, FormField, FieldType, NewFormField, HubFile, UserRole, School, ActivityItem } from './db';
 import authRouter from './auth';
 import { attachUser, requireTeacher, requireAdmin } from './middleware/auth';
 
@@ -247,7 +250,7 @@ const CSS = `
   .dev-lbl { font-size: .78rem; color: #9ca3af; margin-top: 2px; }
 `;
 
-function layout(title: string, content: string, headExtra = ''): string {
+function layout(title: string, content: string, headExtra = '', role = ''): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -261,8 +264,10 @@ function layout(title: string, content: string, headExtra = ''): string {
   <aside class="sidebar">
     <div class="sidebar-brand">Lode<span>Teacher Dashboard</span></div>
     <nav class="sidebar-nav">
-      <a href="/">Hubs</a>
-      <a href="/analytics">School Analytics</a>
+      <a href="/">My Hubs</a>
+      <a href="/analytics">Analytics</a>
+      ${role === 'admin' ? '<a href="/admin">Admin</a>' : ''}
+      <a href="/account">Account</a>
       <a href="/logout">Logout</a>
     </nav>
   </aside>
@@ -303,7 +308,8 @@ function formBuilderPage(
   pageTitle: string,
   initTitle = '',
   initDesc = '',
-  initFields: FormField[] = []
+  initFields: FormField[] = [],
+  role = ''
 ): string {
   const fieldRows = initFields.map((f, idx) => {
     const opts = f.options ? (JSON.parse(f.options) as string[]).join('\n') : '';
@@ -423,14 +429,15 @@ function formBuilderPage(
     });
     </script>`;
 
-  return layout(pageTitle, content);
+  return layout(pageTitle, content, '', role);
 }
 
 // ─── routes ──────────────────────────────────────────────────────────────────
 
 app.use(requireTeacher);
 
-app.get('/', (_req, res) => {
+app.get('/', (req, res) => {
+  const role = req.user?.role ?? '';
   let db;
   try {
     db = getDb();
@@ -449,6 +456,7 @@ app.get('/', (_req, res) => {
           <td>
             <a href="/hubs/${hub.id}/forms" class="btn btn-secondary">Manage</a>
             <a href="/hubs/${hub.id}/analytics" class="btn btn-secondary">Analytics</a>
+            <a href="/hubs/${hub.id}/print" class="btn btn-secondary" target="_blank">Print Sheet</a>
           </td>
         </tr>`;
       })
@@ -459,29 +467,32 @@ app.get('/', (_req, res) => {
 
     res.send(
       layout(
-        'Hubs',
-        `<h1>Hubs</h1>
+        'My Hubs',
+        `<h1>My Hubs</h1>
         <table>
           <thead><tr><th>Code</th><th>Label</th><th>Form</th><th>Actions</th></tr></thead>
           <tbody>${rows || empty}</tbody>
-        </table>`
+        </table>`,
+        '',
+        role
       )
     );
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
 });
 
 app.get('/hubs/:hubId/forms', async (req, res) => {
+  const role = req.user?.role ?? '';
   let db;
   try {
     db = getDb();
     const hubId = parseInt(req.params.hubId, 10);
     const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
     if (!hub) {
-      res.status(404).send(layout('Not Found', '<p>Hub not found.</p>'));
+      res.status(404).send(layout('Not Found', '<p>Hub not found.</p>', '', role));
       return;
     }
     const form = getFormByHubId(db, hubId);
@@ -561,27 +572,28 @@ app.get('/hubs/:hubId/forms', async (req, res) => {
       </form>
     </div>`;
 
-    res.send(layout('Hub', body));
+    res.send(layout('Hub', body, '', role));
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
 });
 
 app.get('/hubs/:hubId/forms/new', (req, res) => {
+  const role = req.user?.role ?? '';
   let db;
   try {
     db = getDb();
     const hubId = parseInt(req.params.hubId, 10);
     const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
     if (!hub) {
-      res.status(404).send(layout('Not Found', '<p>Hub not found.</p>'));
+      res.status(404).send(layout('Not Found', '<p>Hub not found.</p>', '', role));
       return;
     }
-    res.send(formBuilderPage(hubId, hub.label, `/hubs/${hubId}/forms`, 'Create Form'));
+    res.send(formBuilderPage(hubId, hub.label, `/hubs/${hubId}/forms`, 'Create Form', '', '', [], role));
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
@@ -606,25 +618,26 @@ app.post('/hubs/:hubId/forms', (req, res) => {
 });
 
 app.get('/hubs/:hubId/forms/:id/edit', (req, res) => {
+  const role = req.user?.role ?? '';
   let db;
   try {
     db = getDb();
     const hubId = parseInt(req.params.hubId, 10);
     const formId = parseInt(req.params.id, 10);
     const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
-    if (!hub) { res.status(404).send(layout('Not Found', '<p>Hub not found.</p>')); return; }
+    if (!hub) { res.status(404).send(layout('Not Found', '<p>Hub not found.</p>', '', role)); return; }
     const fw = getFormWithFields(db, formId);
-    if (!fw) { res.status(404).send(layout('Not Found', '<p>Form not found.</p>')); return; }
+    if (!fw) { res.status(404).send(layout('Not Found', '<p>Form not found.</p>', '', role)); return; }
     res.send(
       formBuilderPage(
         hubId, hub.label,
         `/hubs/${hubId}/forms/${formId}`,
         'Edit Form',
-        fw.title, fw.description ?? '', fw.fields
+        fw.title, fw.description ?? '', fw.fields, role
       )
     );
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
@@ -665,13 +678,14 @@ app.post('/hubs/:hubId/forms/:id/delete', (req, res) => {
 });
 
 app.get('/hubs/:hubId/forms/:id/responses', (req, res) => {
+  const role = req.user?.role ?? '';
   let db;
   try {
     db = getDb();
     const hubId = parseInt(req.params.hubId, 10);
     const formId = parseInt(req.params.id, 10);
     const fw = getFormWithFields(db, formId);
-    if (!fw) { res.status(404).send(layout('Not Found', '<p>Form not found.</p>')); return; }
+    if (!fw) { res.status(404).send(layout('Not Found', '<p>Form not found.</p>', '', role)); return; }
     const responses = getFormResponsesWithAnswers(db, formId);
 
     const thCols = fw.fields.map((f) => `<th>${esc(f.label)}</th>`).join('');
@@ -695,9 +709,9 @@ app.get('/hubs/:hubId/forms/:id/responses', (req, res) => {
             <tbody>${bodyRows}</tbody>
           </table>`}`;
 
-    res.send(layout('Responses', body));
+    res.send(layout('Responses', body, '', role));
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
@@ -731,12 +745,13 @@ app.get('/hubs/:hubId/forms/:id/responses/export', (req, res) => {
 // ─── analytics routes ────────────────────────────────────────────────────────
 
 app.get('/hubs/:hubId/analytics', (req, res) => {
+  const role = req.user?.role ?? '';
   let db;
   try {
     db = getDb();
     const hubId = parseInt(req.params.hubId, 10);
     const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
-    if (!hub) { res.status(404).send(layout('Not Found', '<p>Hub not found.</p>')); return; }
+    if (!hub) { res.status(404).send(layout('Not Found', '<p>Hub not found.</p>', '', role)); return; }
 
     const stats = getHubAccessStats(db, hubId);
     const clickStats = getLinkClickStats(db, hubId);
@@ -814,9 +829,9 @@ app.get('/hubs/:hubId/analytics', (req, res) => {
         </div>
       </div>`;
 
-    res.send(layout('Analytics', body, '<meta http-equiv="refresh" content="60">'));
+    res.send(layout('Analytics', body, '<meta http-equiv="refresh" content="60">', role));
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
@@ -868,9 +883,9 @@ app.get('/analytics', requireAdmin, (req, res) => {
           : '<p class="muted">No data yet.</p>'}
       </div>`;
 
-    res.send(layout('School Analytics', body, '<meta http-equiv="refresh" content="60">'));
+    res.send(layout('School Analytics', body, '<meta http-equiv="refresh" content="60">', 'admin'));
   } catch (err) {
-    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
   } finally {
     if (db) db.close();
   }
@@ -967,6 +982,535 @@ app.get('/files/:storedName', (req, res) => {
     res.sendFile(filePath);
   } catch {
     res.status(500).send('Error serving file.');
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── print route ─────────────────────────────────────────────────────────────
+
+app.get('/hubs/:hubId/print', async (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.hubId, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (!hub) { res.status(404).send('Hub not found.'); return; }
+    const school = hub.school_id ? getSchoolById(db, hub.school_id) : undefined;
+    const qrUrl = `https://getlode.xyz/c/${hub.code}`;
+    const qrSvg = await QRCode.toString(qrUrl, { type: 'svg' });
+    const logoHtml = school?.branding_logo
+      ? `<img src="/files/${esc(school.branding_logo)}" alt="School logo" style="height:60px;object-fit:contain;margin-bottom:24px">`
+      : '';
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${esc(hub.code)} — Lode Print Sheet</title>
+  <style>
+    @page { margin: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; padding: 48px; text-align: center;
+      background: #fff; color: #111;
+    }
+    .logo-wrap { margin-bottom: 8px; }
+    .qr-wrap { width: 240px; margin: 24px auto; }
+    .qr-wrap svg { width: 100%; height: auto; display: block; }
+    .hub-code { font-size: 4rem; font-weight: 900; letter-spacing: 0.14em; color: #111; margin-bottom: 10px; }
+    .hub-label { font-size: 1.3rem; font-weight: 600; color: #333; margin-bottom: 16px; }
+    .tagline { font-size: 0.95rem; color: #888; margin-bottom: 6px; }
+    .domain { font-size: 1rem; font-weight: 600; color: #555; }
+    .print-btn {
+      margin-top: 32px; padding: 12px 28px; background: #111; color: #fff;
+      border: none; border-radius: 8px; font-size: 1rem; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+    }
+    @media print {
+      .print-btn { display: none; }
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <div class="logo-wrap">${logoHtml}</div>
+  <div class="hub-code">${esc(hub.code)}</div>
+  <div class="qr-wrap">${qrSvg}</div>
+  <div class="hub-label">${esc(hub.label)}</div>
+  <div class="tagline">Type this code at</div>
+  <div class="domain">getlode.xyz</div>
+  <button class="print-btn" onclick="window.print()">Print</button>
+</body>
+</html>`);
+  } catch (err) {
+    res.status(500).send('Error generating print sheet: ' + String(err));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── admin helpers ────────────────────────────────────────────────────────────
+
+function generateTempPassword(): string {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  return Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
+
+// ─── admin routes ─────────────────────────────────────────────────────────────
+
+app.get('/admin', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const schoolId = req.user!.school_id;
+    const school = getSchoolById(db, schoolId);
+    const stats = getSchoolWideStats(db, schoolId);
+    const activity = getRecentActivity(db, schoolId);
+
+    const activityRows = activity.map((a: ActivityItem) => `<tr>
+      <td>${esc(a.type.replace('_', ' '))}</td>
+      <td><code>${esc(a.hub_code)}</code> ${esc(a.hub_label)}</td>
+      <td class="muted">${esc(a.occurred_at)}</td>
+    </tr>`).join('');
+
+    const body = `
+      <h1>Admin Overview</h1>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-val">${stats.total_hubs}</div><div class="stat-lbl">Total Hubs</div></div>
+        <div class="stat-card"><div class="stat-val">${stats.accesses_today}</div><div class="stat-lbl">Accesses Today</div></div>
+        <div class="stat-card"><div class="stat-val">${stats.form_submissions_today}</div><div class="stat-lbl">Submissions Today</div></div>
+        <div class="stat-card"><div class="stat-val" style="font-size:1.1rem">${esc(school?.name ?? '—')}</div><div class="stat-lbl">School</div></div>
+      </div>
+      <div class="card">
+        <h2 style="margin-bottom:12px">Quick Links</h2>
+        <a href="/admin/teachers" class="btn btn-secondary">Manage Teachers</a>
+        <a href="/admin/hubs" class="btn btn-secondary">All Hubs</a>
+        <a href="/admin/broadcast" class="btn btn-secondary">Broadcast</a>
+        <a href="/admin/branding" class="btn btn-secondary">Branding</a>
+      </div>
+      <div class="card">
+        <h2>Recent Activity</h2>
+        ${activity.length > 0
+          ? `<table><thead><tr><th>Event</th><th>Hub</th><th>Time</th></tr></thead><tbody>${activityRows}</tbody></table>`
+          : '<p class="muted">No recent activity.</p>'}
+      </div>`;
+    res.send(layout('Admin', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/admin/teachers', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const schoolId = req.user!.school_id;
+    const teachers = getUsersBySchool(db, schoolId);
+
+    const rows = teachers.map((t) => `<tr>
+      <td>${esc(t.name)}</td>
+      <td>${esc(t.email)}</td>
+      <td><span class="badge ${t.role === 'admin' ? 'badge-green' : 'badge-grey'}">${esc(t.role)}</span></td>
+      <td class="muted">${esc(t.last_active ?? 'Never')}</td>
+      <td>
+        <form method="POST" action="/admin/teachers/${t.id}/role" style="display:inline">
+          <select name="role" onchange="this.form.submit()"
+            style="padding:4px 8px;font-size:.84rem;border:1px solid #d1d5db;border-radius:4px;font-family:inherit">
+            <option value="teacher"${t.role === 'teacher' ? ' selected' : ''}>teacher</option>
+            <option value="admin"${t.role === 'admin' ? ' selected' : ''}>admin</option>
+            <option value="officer"${t.role === 'officer' ? ' selected' : ''}>officer</option>
+          </select>
+        </form>
+        ${t.id !== req.user!.id ? `
+        <form method="POST" action="/admin/teachers/${t.id}/delete" style="display:inline"
+          onsubmit="return confirm('Delete ${esc(t.name)}?')">
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>` : '<span class="muted" style="font-size:.8rem;margin-left:8px">(you)</span>'}
+      </td>
+    </tr>`).join('');
+
+    const body = `
+      <h1>Manage Teachers</h1>
+      <div class="card" style="margin-bottom:20px">
+        <h2 style="margin-bottom:14px">Invite New Teacher</h2>
+        <form method="POST" action="/admin/teachers/invite">
+          <label class="lbl">Name *</label>
+          <input type="text" name="name" required>
+          <label class="lbl">Email *</label>
+          <input type="text" name="email" required>
+          <label class="lbl">Role</label>
+          <select name="role">
+            <option value="teacher">teacher</option>
+            <option value="admin">admin</option>
+            <option value="officer">officer</option>
+          </select>
+          <button type="submit" class="btn btn-primary">Create Account</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>All Teachers (${teachers.length})</h2>
+        ${teachers.length > 0
+          ? `<table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Active</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`
+          : '<p class="muted">No teachers yet.</p>'}
+      </div>`;
+    res.send(layout('Teachers', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/teachers/invite', requireAdmin, async (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const schoolId = req.user!.school_id;
+    const name = (req.body.name as string || '').trim();
+    const email = (req.body.email as string || '').trim().toLowerCase();
+    const role = (['admin', 'teacher', 'officer'].includes(req.body.role) ? req.body.role : 'teacher') as UserRole;
+    if (!name || !email) { res.redirect(302, '/admin/teachers'); return; }
+    const tempPassword = generateTempPassword();
+    const hash = await bcrypt.hash(tempPassword, 10);
+    createUser(db, schoolId, email, hash, role, name);
+    const body = `
+      <h1>Account Created</h1>
+      <div class="card">
+        <p style="margin-bottom:12px">Account created for <strong>${esc(name)}</strong> (<code>${esc(email)}</code>).</p>
+        <label class="lbl">Temporary Password — share this securely, it will not be shown again:</label>
+        <div style="font-family:monospace;font-size:1.3rem;font-weight:700;background:#f3f4f6;padding:16px 20px;border-radius:8px;letter-spacing:.08em;margin-top:8px">${esc(tempPassword)}</div>
+        <p class="muted" style="margin-top:12px">The teacher should log in and change this password.</p>
+        <a href="/admin/teachers" class="btn btn-primary" style="margin-top:16px;display:inline-block">Back to Teachers</a>
+      </div>`;
+    res.send(layout('Account Created', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/teachers/:id/delete', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const userId = parseInt(req.params.id, 10);
+    if (userId !== req.user!.id) deleteUser(db, userId);
+    res.redirect(302, '/admin/teachers');
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/teachers/:id/role', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const userId = parseInt(req.params.id, 10);
+    const role = (['admin', 'teacher', 'officer'].includes(req.body.role) ? req.body.role : 'teacher') as UserRole;
+    updateUserRole(db, userId, role);
+    res.redirect(302, '/admin/teachers');
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/admin/hubs', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const schoolId = req.user!.school_id;
+    const statusFilter = typeof req.query.status === 'string' ? req.query.status : '';
+    const categoryFilter = typeof req.query.category === 'string' ? req.query.category : '';
+
+    let query = 'SELECT h.*, u.name as teacher_name FROM hubs h LEFT JOIN users u ON u.id = h.user_id WHERE h.school_id = ?';
+    const params: unknown[] = [schoolId];
+    if (statusFilter) { query += ' AND h.status = ?'; params.push(statusFilter); }
+    if (categoryFilter) { query += ' AND h.category = ?'; params.push(categoryFilter); }
+    query += ' ORDER BY h.updated_at DESC';
+
+    const hubs = db.prepare(query).all(params) as Array<Hub & { teacher_name: string | null }>;
+
+    const statusBadge = (s: string) => s === 'active'
+      ? '<span class="badge badge-green">active</span>'
+      : `<span class="badge badge-grey">${esc(s)}</span>`;
+
+    const rows = hubs.map((h) => `<tr>
+      <td><code>${esc(h.code)}</code></td>
+      <td>${esc(h.label)}</td>
+      <td>${esc(h.teacher_name ?? '—')}</td>
+      <td>${statusBadge(h.status)}</td>
+      <td>${esc(h.category ?? '—')}</td>
+      <td>
+        <form method="POST" action="/admin/hubs/${h.id}/archive" style="display:inline">
+          <button type="submit" class="btn btn-secondary">${h.status === 'archived' ? 'Unarchive' : 'Archive'}</button>
+        </form>
+        <form method="POST" action="/admin/hubs/${h.id}/delete" style="display:inline"
+          onsubmit="return confirm('Permanently delete hub ${esc(h.code)}?')">
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>
+      </td>
+    </tr>`).join('');
+
+    const filterBar = `
+      <form method="GET" action="/admin/hubs" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px">
+        <select name="status" style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:.87rem">
+          <option value="">All statuses</option>
+          <option value="active"${statusFilter === 'active' ? ' selected' : ''}>Active</option>
+          <option value="archived"${statusFilter === 'archived' ? ' selected' : ''}>Archived</option>
+        </select>
+        <input type="text" name="category" value="${esc(categoryFilter)}" placeholder="Filter category…"
+          style="padding:7px 10px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:.87rem;width:180px;margin-bottom:0">
+        <button type="submit" class="btn btn-secondary">Filter</button>
+        ${statusFilter || categoryFilter ? '<a href="/admin/hubs" class="btn btn-secondary">Clear</a>' : ''}
+      </form>`;
+
+    const body = `
+      <h1>All Hubs (${hubs.length})</h1>
+      ${filterBar}
+      ${hubs.length > 0
+        ? `<table><thead><tr><th>Code</th><th>Label</th><th>Teacher</th><th>Status</th><th>Category</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`
+        : '<p class="muted">No hubs found.</p>'}`;
+    res.send(layout('All Hubs', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/hubs/:id/archive', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.id, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (hub) setHubStatus(db, hubId, hub.status === 'archived' ? 'active' : 'archived');
+    res.redirect(302, '/admin/hubs');
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/hubs/:id/delete', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    deleteHub(db, parseInt(req.params.id, 10));
+    res.redirect(302, '/admin/hubs');
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/admin/broadcast', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const school = getSchoolById(db, req.user!.school_id);
+    const current = school?.broadcast_msg ?? '';
+    const body = `
+      <h1>Broadcast Message</h1>
+      <div class="card">
+        <p class="muted" style="margin-bottom:16px">If set, this appears as a red banner on all student hub pages.</p>
+        <form method="POST" action="/admin/broadcast">
+          <label class="lbl">Message (leave blank to clear)</label>
+          <textarea name="msg" rows="3" placeholder="e.g. School closed tomorrow — no classes">${esc(current)}</textarea>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </form>
+        ${current ? `<form method="POST" action="/admin/broadcast" style="margin-top:8px">
+          <input type="hidden" name="msg" value="">
+          <button type="submit" class="btn btn-danger">Clear Banner</button>
+        </form>` : ''}
+      </div>`;
+    res.send(layout('Broadcast', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/broadcast', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const msg = (req.body.msg as string || '').trim() || null;
+    updateSchoolBroadcast(db, req.user!.school_id, msg);
+    res.redirect(302, '/admin/broadcast');
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/admin/branding', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const school = getSchoolById(db, req.user!.school_id);
+    const body = `
+      <h1>School Branding</h1>
+      <div class="card">
+        <form method="POST" action="/admin/branding">
+          <label class="lbl">School Name *</label>
+          <input type="text" name="name" value="${esc(school?.name ?? '')}" required>
+          <label class="lbl">Primary Color</label>
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px">
+            <input type="color" name="color" value="${esc(school?.branding_color ?? '#000000')}"
+              style="width:48px;height:38px;padding:2px;border:1px solid #d1d5db;border-radius:6px;cursor:pointer">
+            <span class="muted" style="font-size:.84rem">Applied to link buttons and submit buttons on student hub pages</span>
+          </div>
+          <button type="submit" class="btn btn-primary">Save Branding</button>
+        </form>
+      </div>`;
+    res.send(layout('Branding', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/admin/branding', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const name = (req.body.name as string || '').trim();
+    const color = (req.body.color as string || '#000000').trim();
+    if (!name) { res.redirect(302, '/admin/branding'); return; }
+    updateSchoolProfile(db, req.user!.school_id, name, color);
+    res.redirect(302, '/admin/branding');
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── onboarding ───────────────────────────────────────────────────────────────
+
+app.get('/onboarding', requireAdmin, async (req, res) => {
+  const step = typeof req.query.step === 'string' ? parseInt(req.query.step, 10) : 1;
+  const hubIdParam = typeof req.query.hub === 'string' ? req.query.hub : '';
+  let db;
+  try {
+    db = getDb();
+    const school = getSchoolById(db, req.user!.school_id);
+
+    if (step === 3 && hubIdParam) {
+      const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(parseInt(hubIdParam, 10)) as Hub | undefined;
+      if (hub) {
+        const qrUrl = `https://getlode.xyz/c/${hub.code}`;
+        const svg = await QRCode.toString(qrUrl, { type: 'svg' });
+        const body = `
+          <div style="max-width:560px">
+            <div class="muted" style="margin-bottom:8px">Step 3 of 4</div>
+            <h1>Share your hub</h1>
+            <p style="color:#6b7280;margin:12px 0 24px">Your hub is live. Share the URL or print the QR code.</p>
+            <div class="card" style="text-align:center">
+              <div style="font-size:2.5rem;font-weight:900;letter-spacing:.12em;margin-bottom:16px">${esc(hub.code)}</div>
+              <div style="width:180px;margin:0 auto 16px">${svg}</div>
+              <code style="font-size:.9rem">https://getlode.xyz/c/${esc(hub.code)}</code>
+              <div style="margin-top:16px">
+                <a href="/hubs/${hub.id}/print" target="_blank" class="btn btn-secondary">Print Sheet</a>
+              </div>
+            </div>
+            <a href="/onboarding?step=4" class="btn btn-primary" style="margin-top:20px;display:inline-block">Next &rarr;</a>
+          </div>`;
+        res.send(layout('Onboarding', body, '', 'admin'));
+        return;
+      }
+    }
+
+    if (step === 4) {
+      const body = `
+        <div style="max-width:480px;text-align:center;padding-top:40px">
+          <div style="font-size:3rem;margin-bottom:16px">🎉</div>
+          <div class="muted" style="margin-bottom:8px">Step 4 of 4</div>
+          <h1>You're all set!</h1>
+          <p style="color:#6b7280;margin:12px 0 28px">Lode is ready for your school. Invite your teachers, create more hubs, and watch the analytics roll in.</p>
+          <a href="/" class="btn btn-primary">Go to Dashboard</a>
+        </div>`;
+      res.send(layout('Welcome to Lode', body, '', 'admin'));
+      return;
+    }
+
+    if (step === 2) {
+      const body = `
+        <div style="max-width:480px">
+          <div class="muted" style="margin-bottom:8px">Step 2 of 4</div>
+          <h1>Create your first hub</h1>
+          <p style="color:#6b7280;margin:12px 0 20px">A hub is a page students visit. Give it a short code (like <strong>BIO101</strong>) and a label.</p>
+          <div class="card">
+            <form method="POST" action="/onboarding/hub">
+              <label class="lbl">Short Code *</label>
+              <input type="text" name="code" placeholder="e.g. BIO101" required
+                style="text-transform:uppercase;letter-spacing:.06em">
+              <label class="lbl">Label *</label>
+              <input type="text" name="label" placeholder="e.g. Biology 101" required>
+              <button type="submit" class="btn btn-primary">Create Hub &rarr;</button>
+            </form>
+          </div>
+        </div>`;
+      res.send(layout('Onboarding', body, '', 'admin'));
+      return;
+    }
+
+    // Step 1
+    const body = `
+      <div style="max-width:480px">
+        <div class="muted" style="margin-bottom:8px">Step 1 of 4</div>
+        <h1>Welcome to Lode</h1>
+        <p style="color:#6b7280;margin:12px 0 20px">Let's get your school set up. First, confirm your school name.</p>
+        <div class="card">
+          <form method="POST" action="/admin/branding">
+            <input type="hidden" name="color" value="${esc(school?.branding_color ?? '#000000')}">
+            <label class="lbl">School Name *</label>
+            <input type="text" name="name" value="${esc(school?.name ?? '')}" required>
+            <button type="submit" class="btn btn-primary">Confirm &rarr;</button>
+          </form>
+        </div>
+        <a href="/onboarding?step=2" class="muted" style="font-size:.84rem;display:inline-block;margin-top:12px">Skip this step</a>
+      </div>`;
+    res.send(layout('Onboarding', body, '', 'admin'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/onboarding/hub', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const schoolId = req.user!.school_id;
+    const code = (req.body.code as string || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const label = (req.body.label as string || '').trim();
+    if (!code || !label) { res.redirect(302, '/onboarding?step=2'); return; }
+    const existing = db.prepare('SELECT id FROM hubs WHERE code = ?').get(code);
+    if (existing) { res.redirect(302, '/onboarding?step=2'); return; }
+    const result = db.prepare(
+      `INSERT INTO hubs (code, label, school_id, user_id, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'active', datetime('now'), datetime('now'))`
+    ).run(code, label, schoolId, req.user!.id);
+    res.redirect(302, `/onboarding?step=3&hub=${result.lastInsertRowid}`);
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
   } finally {
     if (db) db.close();
   }

@@ -14,6 +14,7 @@ export interface School {
   branding_logo: string | null;
   branding_color: string;
   created_at: string;
+  broadcast_msg: string | null;
 }
 
 export type UserRole = 'admin' | 'teacher' | 'officer';
@@ -271,6 +272,11 @@ function migrateSchema(db: Database.Database): void {
   }
   if (!colNames.includes('notes')) {
     db.exec('ALTER TABLE hubs ADD COLUMN notes TEXT');
+  }
+  const schoolCols = db.pragma('table_info(schools)') as Array<{ name: string }>;
+  const schoolColNames = schoolCols.map(c => c.name);
+  if (!schoolColNames.includes('broadcast_msg')) {
+    db.exec('ALTER TABLE schools ADD COLUMN broadcast_msg TEXT');
   }
 }
 
@@ -535,6 +541,49 @@ export function getSchoolById(db: Database.Database, id: number): School | undef
   return db.prepare('SELECT * FROM schools WHERE id = ?').get(id) as School | undefined;
 }
 
+export function updateSchoolProfile(db: Database.Database, schoolId: number, name: string, color: string): void {
+  db.prepare('UPDATE schools SET name = ?, branding_color = ? WHERE id = ?').run(name, color, schoolId);
+}
+
+export function updateSchoolBroadcast(db: Database.Database, schoolId: number, msg: string | null): void {
+  db.prepare('UPDATE schools SET broadcast_msg = ? WHERE id = ?').run(msg, schoolId);
+}
+
+export function getSchoolByHubId(db: Database.Database, hubId: number): School | undefined {
+  return db.prepare(`
+    SELECT s.* FROM schools s
+    JOIN hubs h ON h.school_id = s.id
+    WHERE h.id = ?
+  `).get(hubId) as School | undefined;
+}
+
+export function setHubStatus(db: Database.Database, hubId: number, status: string): void {
+  db.prepare('UPDATE hubs SET status = ? WHERE id = ?').run(status, hubId);
+}
+
+export function getRecentActivity(db: Database.Database, schoolId: number): ActivityItem[] {
+  const accesses = db.prepare(`
+    SELECT 'access' as type, h.code as hub_code, h.label as hub_label, hal.accessed_at as occurred_at
+    FROM hub_access_log hal
+    JOIN hubs h ON h.id = hal.hub_id
+    WHERE h.school_id = ?
+    ORDER BY hal.accessed_at DESC
+    LIMIT 20
+  `).all(schoolId) as ActivityItem[];
+  const submissions = db.prepare(`
+    SELECT 'form_submission' as type, h.code as hub_code, h.label as hub_label, fr.submitted_at as occurred_at
+    FROM form_responses fr
+    JOIN forms f ON f.id = fr.form_id
+    JOIN hubs h ON h.id = f.hub_id
+    WHERE h.school_id = ?
+    ORDER BY fr.submitted_at DESC
+    LIMIT 20
+  `).all(schoolId) as ActivityItem[];
+  return [...accesses, ...submissions]
+    .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))
+    .slice(0, 20);
+}
+
 export function updateSchoolBranding(
   db: Database.Database,
   schoolId: number,
@@ -672,6 +721,13 @@ export interface SchoolWideStats {
   most_accessed_hub_today: { code: string; label: string; count: number } | null;
   hub_table: Array<{ code: string; label: string; accesses_today: number; total_accesses: number }>;
   teacher_leaderboard: Array<{ name: string; accesses_today: number }>;
+}
+
+export interface ActivityItem {
+  type: string;
+  hub_code: string;
+  hub_label: string;
+  occurred_at: string;
 }
 
 export function logHubAccess(db: Database.Database, hubId: number, deviceHint: string | null): void {

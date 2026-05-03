@@ -6,9 +6,9 @@ import {
   getDb, getHubWithLinks, isHubExpired, getHubByCode,
   getFormByHubId, getFormWithFields, saveFormResponse,
   getFilesByHubId, getFileByStoredName,
-  logHubAccess, logLinkClick,
+  logHubAccess, logLinkClick, getSchoolById,
 } from './db';
-import type { HubWithLinks, FormWithFields, HubFile } from './db';
+import type { HubWithLinks, FormWithFields, HubFile, School } from './db';
 
 function parseDeviceHint(ua: string): 'mobile' | 'desktop' | 'unknown' {
   if (/mobile|android|iphone|ipad|tablet/i.test(ua)) return 'mobile';
@@ -110,14 +110,22 @@ function renderActive(
   hub: HubWithLinks,
   form: FormWithFields | null = null,
   errors: Map<number, string> = new Map(),
-  files: HubFile[] = []
+  files: HubFile[] = [],
+  school: School | null = null
 ): string {
+  const brandColor = school?.branding_color ?? '#111111';
   const linkItems = hub.links
     .map(
       (l) =>
-        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}&from=${encodeURIComponent(hub.code)}">${esc(l.title)}</a>`
+        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}&from=${encodeURIComponent(hub.code)}" style="background:${esc(brandColor)}">${esc(l.title)}</a>`
     )
     .join('\n');
+
+  const broadcastBanner = school?.broadcast_msg
+    ? `<div class="broadcast-banner">${esc(school.broadcast_msg)}</div>`
+    : '';
+
+  const schoolFooter = school?.name ? esc(school.name) + ' &middot; ' : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -130,9 +138,19 @@ function renderActive(
     body {
       background: #ffffff;
       color: #111111;
-      padding: 32px 20px;
+      padding: 32px 20px 60px;
       max-width: 600px;
       margin: 0 auto;
+    }
+    .broadcast-banner {
+      background: #dc2626;
+      color: #fff;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 500;
+      margin-bottom: 24px;
+      line-height: 1.4;
     }
     h1 {
       font-size: 1.75rem;
@@ -186,7 +204,7 @@ function renderActive(
     }
     .submit-btn {
       display: block; width: 100%;
-      background: #111; color: #fff; border: none;
+      background: ${brandColor}; color: #fff; border: none;
       border-radius: 10px; padding: 18px 20px;
       font-size: 1rem; font-family: inherit;
       font-weight: 600; margin-top: 24px; cursor: pointer;
@@ -208,9 +226,15 @@ function renderActive(
     }
     .file-name { flex: 1; font-weight: 500; }
     .file-size { font-size: 0.8rem; color: #888; flex-shrink: 0; }
+    .page-footer {
+      margin-top: 48px; padding-top: 20px; border-top: 1px solid #f3f4f6;
+      font-size: 0.78rem; color: #bbb; text-align: center;
+    }
+    .page-footer a { color: #bbb; text-decoration: none; }
   </style>
 </head>
 <body>
+  ${broadcastBanner}
   <h1>${esc(hub.label)}</h1>
   <div class="links">
 ${hub.links.length > 0 ? linkItems : '    <p class="no-links">No links have been added to this hub yet.</p>'}
@@ -225,6 +249,7 @@ ${hub.links.length > 0 ? linkItems : '    <p class="no-links">No links have been
     </a>`).join('')}
   </div>` : ''}
   ${form ? renderFormSection(hub, form, errors) : ''}
+  <div class="page-footer">${schoolFooter}Powered by <a href="https://getlode.xyz">Lode</a></div>
 </body>
 </html>`;
 }
@@ -278,47 +303,52 @@ function renderExpired(hub: HubWithLinks): string {
 }
 
 function renderNotFound(code: string): string {
+  const isError = code === 'error';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hub Not Found</title>
+  <title>${isError ? 'Something went wrong' : 'Hub Not Found'} — Lode</title>
   <style>
     ${BASE_STYLES}
     body {
-      background: #ffffff;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      background: #fff; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
       padding: 32px 20px;
     }
-    .box {
-      text-align: center;
+    .box { text-align: center; max-width: 480px; width: 100%; }
+    .code-big { font-size: 5rem; font-weight: 900; color: #e5e7eb; line-height: 1; margin-bottom: 16px; }
+    h1 { font-size: 1.4rem; font-weight: 700; color: #111; margin-bottom: 10px; }
+    p { color: #666; font-size: 0.95rem; margin-bottom: 24px; }
+    form { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    input[type="text"] {
+      padding: 12px 14px; border: 2px solid #e5e7eb; border-radius: 8px;
+      font-size: 1rem; font-family: inherit; text-transform: uppercase;
+      letter-spacing: .06em; color: #111; width: 180px;
     }
-    h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: #111;
-      margin-bottom: 10px;
+    button[type="submit"] {
+      padding: 12px 20px; background: #111; color: #fff; border: none;
+      border-radius: 8px; font-size: 1rem; font-family: inherit;
+      font-weight: 600; cursor: pointer;
     }
-    p {
-      color: #666;
-      font-size: 1rem;
-    }
-    code {
-      background: #f3f4f6;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: monospace;
-    }
+    .footer { margin-top: 32px; font-size: 0.78rem; color: #bbb; }
+    .footer a { color: #bbb; text-decoration: none; }
   </style>
 </head>
 <body>
   <div class="box">
-    <h1>Hub Not Found</h1>
-    <p>No hub exists with the code <code>${esc(code.toUpperCase())}</code>.</p>
+    <div class="code-big">${isError ? '500' : '404'}</div>
+    <h1>${isError ? 'Something went wrong' : 'This code doesn\'t exist'}</h1>
+    <p>${isError
+      ? 'An unexpected error occurred. Please try again.'
+      : `No hub found for <strong>${esc(code.toUpperCase())}</strong>. Check the code and try again.`}</p>
+    ${!isError ? `
+    <form action="/go" method="GET">
+      <input type="text" name="code" placeholder="Try another code" autocomplete="off" autocorrect="off" spellcheck="false">
+      <button type="submit">Go</button>
+    </form>` : `<p><a href="/" style="color:#111;font-weight:600">Go home</a></p>`}
+    <p class="footer">Powered by <a href="https://getlode.xyz">Lode</a></p>
   </div>
 </body>
 </html>`;
@@ -442,7 +472,8 @@ app.get('/c/:code', (req, res) => {
     const form = getFormByHubId(db, hub.id);
     const fw = form ? (getFormWithFields(db, form.id) ?? null) : null;
     const files = getFilesByHubId(db, hub.id);
-    res.status(200).send(renderActive(hub, fw, new Map(), files));
+    const school = hub.school_id ? (getSchoolById(db, hub.school_id) ?? null) : null;
+    res.status(200).send(renderActive(hub, fw, new Map(), files, school));
     const hubId = hub.id;
     const deviceHint = parseDeviceHint(req.headers['user-agent'] ?? '');
     setImmediate(() => {
@@ -574,7 +605,8 @@ app.post('/c/:code/submit', (req, res) => {
     }
 
     if (errors.size > 0) {
-      res.status(200).send(renderActive(hub, fw, errors));
+      const school = hub.school_id ? (getSchoolById(db, hub.school_id) ?? null) : null;
+      res.status(200).send(renderActive(hub, fw, errors, [], school));
       return;
     }
 
