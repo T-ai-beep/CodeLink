@@ -9,7 +9,7 @@ import { runDelete } from './commands/delete';
 
 const BANNER = `
 ${chalk.bold.blue('╔═══════════════════════════════╗')}
-${chalk.bold.blue('║')}  ${chalk.bold.cyan('EduCode')} ${chalk.grey('— School Hub Manager')}  ${chalk.bold.blue('║')}
+${chalk.bold.blue('║')}     ${chalk.bold.cyan('Lode')} ${chalk.grey('— School Hub Manager')}     ${chalk.bold.blue('║')}
 ${chalk.bold.blue('╚═══════════════════════════════╝')}
 `;
 
@@ -36,7 +36,7 @@ async function selectCommand(): Promise<Command> {
         { name: `${chalk.blue('list')}    — List all active hubs`, value: 'list' },
         { name: `${chalk.red('delete')}  — Permanently delete a hub`, value: 'delete' },
         new inquirer.Separator(),
-        { name: `${chalk.grey('exit')}    — Quit EduCode`, value: 'exit' },
+        { name: `${chalk.grey('exit')}    — Quit Lode`, value: 'exit' },
       ],
     },
   ]);

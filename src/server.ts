@@ -1,9 +1,37 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import {
-  getDb, getHubWithLinks, isHubExpired,
+  getDb, getHubWithLinks, isHubExpired, getHubByCode,
   getFormByHubId, getFormWithFields, saveFormResponse,
+  getFilesByHubId, getFileByStoredName,
+  logHubAccess, logLinkClick,
 } from './db';
-import type { HubWithLinks, FormWithFields } from './db';
+import type { HubWithLinks, FormWithFields, HubFile } from './db';
+
+function parseDeviceHint(ua: string): 'mobile' | 'desktop' | 'unknown' {
+  if (/mobile|android|iphone|ipad|tablet/i.test(ua)) return 'mobile';
+  if (ua.trim() !== '') return 'desktop';
+  return 'unknown';
+}
+
+const UPLOAD_DIR = path.join(os.homedir(), '.lode', 'uploads');
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileTypeLabel(mimetype: string): string {
+  if (mimetype === 'application/pdf') return '[PDF]';
+  if (mimetype.startsWith('image/')) return '[IMG]';
+  if (mimetype.includes('word')) return '[DOC]';
+  if (mimetype.includes('excel') || mimetype.includes('spreadsheet')) return '[XLS]';
+  if (mimetype.includes('powerpoint') || mimetype.includes('presentation')) return '[PPT]';
+  return '[FILE]';
+}
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const app = express();
@@ -36,19 +64,32 @@ function renderFormSection(
       ? `<div class="f-error">${esc(err)}</div>`
       : '';
     const req = field.required ? ' <span class="f-req">*</span>' : '';
+    const reqAttr = field.required ? ' required' : '';
+    const errCls = err ? ' inp-err' : '';
     let input = '';
     if (field.type === 'short_text') {
-      input = `<input type="text" name="f_${field.id}" class="${err ? 'inp-err' : ''}">`;
+      input = `<input type="text" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
     } else if (field.type === 'long_text') {
-      input = `<textarea name="f_${field.id}" rows="4" class="${err ? 'inp-err' : ''}"></textarea>`;
+      input = `<textarea name="f_${field.id}" rows="4"${reqAttr} class="${errCls.trim()}"></textarea>`;
+    } else if (field.type === 'dropdown') {
+      const opts: string[] = field.options ? (JSON.parse(field.options) as string[]) : [];
+      const optHtml = opts.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+      input = `<select name="f_${field.id}"${reqAttr} class="${errCls.trim()}"><option value="">— select —</option>${optHtml}</select>`;
+    } else if (field.type === 'date') {
+      input = `<input type="date" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
+    } else if (field.type === 'name') {
+      input = `<div class="name-pair"><input type="text" name="f_${field.id}_first" placeholder="First Name"${reqAttr} class="${errCls.trim()}"><input type="text" name="f_${field.id}_last" placeholder="Last Name"${reqAttr} class="${errCls.trim()}"></div>`;
+    } else if (field.type === 'email') {
+      input = `<input type="email" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
+    } else if (field.type === 'number') {
+      input = `<input type="number" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
+    } else if (field.type === 'phone') {
+      input = `<input type="tel" name="f_${field.id}"${reqAttr} class="${errCls.trim()}">`;
     } else {
       const opts: string[] = field.options ? (JSON.parse(field.options) as string[]) : [];
       const itype = field.type === 'multiple_choice' ? 'radio' : 'checkbox';
       input = opts
-        .map(
-          (o) =>
-            `<label class="opt-label"><input type="${itype}" name="f_${field.id}" value="${esc(o)}"> ${esc(o)}</label>`
-        )
+        .map((o) => `<label class="opt-label"><input type="${itype}" name="f_${field.id}" value="${esc(o)}"> ${esc(o)}</label>`)
         .join('\n');
     }
     return `<div class="f-group">\n  <label class="f-label">${esc(field.label)}${req}</label>\n  ${errHtml}${input}\n</div>`;
@@ -68,12 +109,13 @@ function renderFormSection(
 function renderActive(
   hub: HubWithLinks,
   form: FormWithFields | null = null,
-  errors: Map<number, string> = new Map()
+  errors: Map<number, string> = new Map(),
+  files: HubFile[] = []
 ): string {
   const linkItems = hub.links
     .map(
       (l) =>
-        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}">${esc(l.title)}</a>`
+        `    <a class="link-btn" href="/leave?url=${encodeURIComponent(l.url)}&from=${encodeURIComponent(hub.code)}">${esc(l.title)}</a>`
     )
     .join('\n');
 
@@ -125,7 +167,8 @@ function renderActive(
     .f-label { display: block; font-size: 0.9rem; font-weight: 500; margin-bottom: 6px; }
     .f-req { color: #dc2626; }
     .f-error { color: #dc2626; font-size: 0.82rem; margin-bottom: 4px; }
-    input[type="text"], textarea {
+    input[type="text"], input[type="date"], input[type="email"],
+    input[type="number"], input[type="tel"], select, textarea {
       display: block; width: 100%;
       padding: 12px 14px;
       border: 2px solid #e5e7eb;
@@ -134,6 +177,8 @@ function renderActive(
       font-family: inherit;
       color: #111;
     }
+    .name-pair { display: flex; gap: 12px; }
+    .name-pair input { flex: 1; }
     .inp-err { border-color: #dc2626; }
     .opt-label {
       display: flex; align-items: center; gap: 8px;
@@ -146,6 +191,23 @@ function renderActive(
       font-size: 1rem; font-family: inherit;
       font-weight: 600; margin-top: 24px; cursor: pointer;
     }
+    .files-wrap {
+      margin-top: 36px; padding-top: 28px;
+      border-top: 2px solid #e5e7eb;
+    }
+    h2.files-title { font-size: 1.2rem; font-weight: 700; margin-bottom: 16px; }
+    a.file-btn {
+      display: flex; align-items: center; gap: 12px;
+      background: #f3f4f6; color: #111; text-decoration: none;
+      padding: 14px 18px; border-radius: 8px; margin-bottom: 10px;
+      font-size: 0.9rem;
+    }
+    .file-type-badge {
+      font-size: 0.72rem; font-weight: 700; font-family: monospace;
+      background: #e5e7eb; padding: 2px 6px; border-radius: 4px; flex-shrink: 0;
+    }
+    .file-name { flex: 1; font-weight: 500; }
+    .file-size { font-size: 0.8rem; color: #888; flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -153,6 +215,15 @@ function renderActive(
   <div class="links">
 ${hub.links.length > 0 ? linkItems : '    <p class="no-links">No links have been added to this hub yet.</p>'}
   </div>
+  ${files.length > 0 ? `
+  <div class="files-wrap">
+    <h2 class="files-title">Files</h2>
+    ${files.map((f) => `<a class="file-btn" href="/files/${f.stored_name}">
+      <span class="file-type-badge">${fileTypeLabel(f.mimetype)}</span>
+      <span class="file-name">${esc(f.filename)}</span>
+      <span class="file-size">${formatSize(f.size)}</span>
+    </a>`).join('')}
+  </div>` : ''}
   ${form ? renderFormSection(hub, form, errors) : ''}
 </body>
 </html>`;
@@ -259,7 +330,7 @@ function renderHomepage(): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EduCode</title>
+  <title>Lode</title>
   <style>
     ${BASE_STYLES}
     body {
@@ -320,7 +391,7 @@ function renderHomepage(): string {
 </head>
 <body>
   <div class="container">
-    <div class="brand">EduCode</div>
+    <div class="brand">Lode</div>
     <div class="tagline">Enter your class code to access your hub.</div>
     <form action="/go" method="GET">
       <input
@@ -370,7 +441,15 @@ app.get('/c/:code', (req, res) => {
 
     const form = getFormByHubId(db, hub.id);
     const fw = form ? (getFormWithFields(db, form.id) ?? null) : null;
-    res.status(200).send(renderActive(hub, fw));
+    const files = getFilesByHubId(db, hub.id);
+    res.status(200).send(renderActive(hub, fw, new Map(), files));
+    const hubId = hub.id;
+    const deviceHint = parseDeviceHint(req.headers['user-agent'] ?? '');
+    setImmediate(() => {
+      let logDb;
+      try { logDb = getDb(); logHubAccess(logDb, hubId, deviceHint); }
+      catch { /* ignore */ } finally { if (logDb) logDb.close(); }
+    });
   } catch (err) {
     res.status(500).send(renderNotFound('error'));
   } finally {
@@ -412,7 +491,7 @@ function renderLeave(url: string): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>You're leaving EduCode</title>
+  <title>You're leaving Lode</title>
   <style>
     ${BASE_STYLES}
     body {
@@ -444,7 +523,7 @@ function renderLeave(url: string): string {
 </head>
 <body>
   <div class="box">
-    <h1>You're leaving EduCode</h1>
+    <h1>You're leaving Lode</h1>
     <p class="sub">We don't control this destination and cannot verify its content. Proceed with caution.</p>
     <div class="url-box">${esc(url)}</div>
     <div class="actions">
@@ -481,10 +560,16 @@ app.post('/c/:code/submit', (req, res) => {
 
     for (const field of fw.fields) {
       if (field.required) {
-        const val = body[`f_${field.id}`];
-        const missing =
-          !val || (Array.isArray(val) ? val.length === 0 : val.trim() === '');
-        if (missing) errors.set(field.id, 'This field is required.');
+        if (field.type === 'name') {
+          const first = ((body[`f_${field.id}_first`] as string) || '').trim();
+          const last = ((body[`f_${field.id}_last`] as string) || '').trim();
+          if (!first || !last) errors.set(field.id, 'This field is required.');
+        } else {
+          const val = body[`f_${field.id}`];
+          const missing =
+            !val || (Array.isArray(val) ? val.length === 0 : val.trim() === '');
+          if (missing) errors.set(field.id, 'This field is required.');
+        }
       }
     }
 
@@ -494,10 +579,16 @@ app.post('/c/:code/submit', (req, res) => {
     }
 
     const answers = fw.fields.map((field) => {
-      const val = body[`f_${field.id}`];
       let value = '';
-      if (Array.isArray(val)) value = val.join(', ');
-      else if (val) value = val.trim();
+      if (field.type === 'name') {
+        const first = ((body[`f_${field.id}_first`] as string) || '').trim();
+        const last = ((body[`f_${field.id}_last`] as string) || '').trim();
+        value = `${first}|${last}`;
+      } else {
+        const val = body[`f_${field.id}`];
+        if (Array.isArray(val)) value = val.join(', ');
+        else if (val) value = val.trim();
+      }
       return { fieldId: field.id, value };
     });
 
@@ -516,6 +607,7 @@ app.get('/c/:code/thanks', (req, res) => {
 
 app.get('/leave', (req, res) => {
   const rawUrl = typeof req.query.url === 'string' ? req.query.url : '';
+  const fromCode = typeof req.query.from === 'string' ? req.query.from.trim().toUpperCase() : '';
   let valid = false;
   try { new URL(rawUrl); valid = true; } catch { valid = false; }
   if (!valid || !rawUrl) {
@@ -523,9 +615,37 @@ app.get('/leave', (req, res) => {
     return;
   }
   res.status(200).send(renderLeave(rawUrl));
+  if (fromCode) {
+    setImmediate(() => {
+      let logDb;
+      try {
+        logDb = getDb();
+        const hub = getHubByCode(logDb, fromCode);
+        if (hub) logLinkClick(logDb, hub.id, rawUrl);
+      } catch { /* ignore */ } finally { if (logDb) logDb.close(); }
+    });
+  }
+});
+
+app.get('/files/:storedName', (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const file = getFileByStoredName(db, req.params.storedName);
+    if (!file) { res.status(404).send('File not found.'); return; }
+    const filePath = path.join(UPLOAD_DIR, file.stored_name);
+    if (!fs.existsSync(filePath)) { res.status(404).send('File not found.'); return; }
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename.replace(/"/g, '_')}"`);
+    res.sendFile(filePath);
+  } catch {
+    res.status(500).send('Error serving file.');
+  } finally {
+    if (db) db.close();
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`EduCode server running at http://localhost:${PORT}`);
+  console.log(`Lode server running at http://localhost:${PORT}`);
   console.log(`Student hubs available at http://localhost:${PORT}/c/<CODE>`);
 });

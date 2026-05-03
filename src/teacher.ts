@@ -1,10 +1,22 @@
 import express from 'express';
+import cookieParser from 'cookie-parser';
+import QRCode from 'qrcode';
+import multer from 'multer';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import {
   getDb, getAllHubs, getFormByHubId, getFormWithFields,
   createForm, updateForm, deleteForm,
   getFormResponsesWithAnswers, getResponseCount,
+  addFile, getFilesByHubId, getFileById, getFileByStoredName, deleteFile,
+  getHubAccessStats, getLinkClickStats, getFormSubmissionRate,
+  getHubAccessByDay, getSchoolWideStats,
 } from './db';
-import type { Hub, FormField, FieldType, NewFormField } from './db';
+import type { Hub, FormField, FieldType, NewFormField, HubFile } from './db';
+import authRouter from './auth';
+import { attachUser, requireTeacher, requireAdmin } from './middleware/auth';
 
 const TEACHER_PORT = process.env.TEACHER_PORT
   ? parseInt(process.env.TEACHER_PORT, 10)
@@ -12,6 +24,9 @@ const TEACHER_PORT = process.env.TEACHER_PORT
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+app.use(attachUser);
+app.use(authRouter);
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -33,6 +48,7 @@ function toCsv(headers: string[], rows: string[][]): string {
 
 const VALID_TYPES = new Set<string>([
   'short_text', 'long_text', 'multiple_choice', 'checkbox',
+  'dropdown', 'date', 'name', 'email', 'number', 'phone',
 ]);
 
 function parseFields(raw: unknown): NewFormField[] {
@@ -45,7 +61,7 @@ function parseFields(raw: unknown): NewFormField[] {
     .filter((f) => f.label && f.label.trim())
     .map((f, idx) => {
       const type = (VALID_TYPES.has(f.type ?? '') ? f.type : 'short_text') as FieldType;
-      const hasOptions = type === 'multiple_choice' || type === 'checkbox';
+      const hasOptions = type === 'multiple_choice' || type === 'checkbox' || type === 'dropdown';
       return {
         label: (f.label ?? '').trim(),
         type,
@@ -57,6 +73,81 @@ function parseFields(raw: unknown): NewFormField[] {
         order_index: idx,
       };
     });
+}
+
+// ─── file upload setup ───────────────────────────────────────────────────────
+
+const UPLOAD_DIR = path.join(os.homedir(), '.lode', 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const ALLOWED_MIMETYPES = new Set([
+  'application/pdf',
+  'image/png', 'image/jpeg', 'image/gif',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+]);
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (_req, _file, cb) => cb(null, crypto.randomUUID()),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    ALLOWED_MIMETYPES.has(file.mimetype) ? cb(null, true) : cb(new Error('File type not allowed'));
+  },
+});
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileTypeLabel(mimetype: string): string {
+  if (mimetype === 'application/pdf') return '[PDF]';
+  if (mimetype.startsWith('image/')) return '[IMG]';
+  if (mimetype.includes('word')) return '[DOC]';
+  if (mimetype.includes('excel') || mimetype.includes('spreadsheet')) return '[XLS]';
+  if (mimetype.includes('powerpoint') || mimetype.includes('presentation')) return '[PPT]';
+  return '[FILE]';
+}
+
+function renderPrintSheet(hub: Hub, svgString: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${esc(hub.code)} — Lode QR</title>
+  <style>
+    @page { margin: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; padding: 48px; text-align: center;
+    }
+    .qr-wrap { width: 280px; margin-bottom: 28px; }
+    .qr-wrap svg { width: 100%; height: auto; display: block; }
+    .hub-label { font-size: 1.5rem; font-weight: 700; color: #111; margin-bottom: 8px; }
+    .domain { font-size: 1rem; color: #888; margin-bottom: 14px; }
+    .hub-code { font-size: 3rem; font-weight: 800; letter-spacing: 0.12em; color: #111; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <div class="qr-wrap">${svgString}</div>
+  <div class="hub-label">${esc(hub.label)}</div>
+  <div class="domain">getlode.xyz</div>
+  <div class="hub-code">${esc(hub.code)}</div>
+</body>
+</html>`;
 }
 
 // ─── layout & shared CSS ─────────────────────────────────────────────────────
@@ -140,21 +231,40 @@ const CSS = `
   .mt2 { margin-top: 8px; }
   .mt3 { margin-top: 12px; }
   code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: .84rem; }
+  .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 20px; }
+  .stat-card { background: #fff; border-radius: 8px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
+  .stat-val { font-size: 2rem; font-weight: 800; color: #111; line-height: 1; margin-bottom: 6px; }
+  .stat-lbl { font-size: .78rem; color: #9ca3af; text-transform: uppercase; letter-spacing: .04em; }
+  .chart-outer { height: 140px; display: flex; align-items: flex-end; gap: 6px; padding: 8px 0 0; }
+  .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; }
+  .bar-track { flex: 1; width: 100%; background: #f3f4f6; border-radius: 4px 4px 0 0; display: flex; align-items: flex-end; }
+  .bar-fill { width: 100%; background: #111; border-radius: 4px 4px 0 0; min-height: 2px; }
+  .bar-n { font-size: .68rem; color: #6b7280; }
+  .bar-lbl { font-size: .7rem; color: #9ca3af; }
+  .dev-row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .dev-item { text-align: center; }
+  .dev-val { font-size: 1.4rem; font-weight: 700; color: #111; }
+  .dev-lbl { font-size: .78rem; color: #9ca3af; margin-top: 2px; }
 `;
 
-function layout(title: string, content: string): string {
+function layout(title: string, content: string, headExtra = ''): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${esc(title)} — EduCode Teacher</title>
+  <title>${esc(title)} — Lode</title>
+  ${headExtra}
   <style>${CSS}</style>
 </head>
 <body>
   <aside class="sidebar">
-    <div class="sidebar-brand">EduCode<span>Teacher Dashboard</span></div>
-    <nav class="sidebar-nav"><a href="/" class="active">Hubs</a></nav>
+    <div class="sidebar-brand">Lode<span>Teacher Dashboard</span></div>
+    <nav class="sidebar-nav">
+      <a href="/">Hubs</a>
+      <a href="/analytics">School Analytics</a>
+      <a href="/logout">Logout</a>
+    </nav>
   </aside>
   <main class="main">${content}</main>
 </body>
@@ -166,6 +276,7 @@ function layout(title: string, content: string): string {
 function renderFieldPreview(fields: FormField[]): string {
   const icons: Record<string, string> = {
     short_text: '—', long_text: '≡', multiple_choice: '◉', checkbox: '☑',
+    dropdown: '▾', date: '◻', name: 'Aa', email: '@', number: '#', phone: '℡',
   };
   return fields.map((f) => {
     const opts = f.options ? (JSON.parse(f.options) as string[]) : [];
@@ -197,8 +308,8 @@ function formBuilderPage(
   const fieldRows = initFields.map((f, idx) => {
     const opts = f.options ? (JSON.parse(f.options) as string[]).join('\n') : '';
     const showOpts =
-      f.type === 'multiple_choice' || f.type === 'checkbox' ? '' : 'display:none';
-    const allTypes = ['short_text', 'long_text', 'multiple_choice', 'checkbox'];
+      f.type === 'multiple_choice' || f.type === 'checkbox' || f.type === 'dropdown' ? '' : 'display:none';
+    const allTypes = ['short_text', 'long_text', 'multiple_choice', 'checkbox', 'dropdown', 'date', 'name', 'email', 'number', 'phone'];
     const typeOpts = allTypes
       .map(
         (t) =>
@@ -247,11 +358,11 @@ function formBuilderPage(
     var fieldCount = ${startCount};
 
     function buildFieldRow(idx, label, type, required, options) {
-      var types = ['short_text','long_text','multiple_choice','checkbox'];
+      var types = ['short_text','long_text','multiple_choice','checkbox','dropdown','date','name','email','number','phone'];
       var typeOpts = types.map(function(t) {
         return '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t.replace(/_/g,' ') + '</option>';
       }).join('');
-      var showOpts = (type === 'multiple_choice' || type === 'checkbox') ? '' : 'display:none';
+      var showOpts = (type === 'multiple_choice' || type === 'checkbox' || type === 'dropdown') ? '' : 'display:none';
       return '<div class="frow-header">' +
         '<input type="text" name="fields[' + idx + '][label]" placeholder="Field label" value="' + label + '" required>' +
         '<select name="fields[' + idx + '][type]" onchange="onTypeChange(this,' + idx + ')">' + typeOpts + '</select>' +
@@ -294,7 +405,7 @@ function formBuilderPage(
 
     function onTypeChange(sel, idx) {
       var d = document.getElementById('opts-' + idx);
-      d.style.display = (sel.value === 'multiple_choice' || sel.value === 'checkbox') ? '' : 'none';
+      d.style.display = (sel.value === 'multiple_choice' || sel.value === 'checkbox' || sel.value === 'dropdown') ? '' : 'none';
     }
 
     document.getElementById('form-builder').addEventListener('submit', function() {
@@ -317,6 +428,8 @@ function formBuilderPage(
 
 // ─── routes ──────────────────────────────────────────────────────────────────
 
+app.use(requireTeacher);
+
 app.get('/', (_req, res) => {
   let db;
   try {
@@ -333,7 +446,10 @@ app.get('/', (_req, res) => {
           <td><code>${esc(hub.code)}</code></td>
           <td>${esc(hub.label)}</td>
           <td>${badge}</td>
-          <td><a href="/hubs/${hub.id}/forms" class="btn btn-secondary">View Forms</a></td>
+          <td>
+            <a href="/hubs/${hub.id}/forms" class="btn btn-secondary">Manage</a>
+            <a href="/hubs/${hub.id}/analytics" class="btn btn-secondary">Analytics</a>
+          </td>
         </tr>`;
       })
       .join('');
@@ -346,7 +462,7 @@ app.get('/', (_req, res) => {
         'Hubs',
         `<h1>Hubs</h1>
         <table>
-          <thead><tr><th>Code</th><th>Label</th><th>Form</th><th></th></tr></thead>
+          <thead><tr><th>Code</th><th>Label</th><th>Form</th><th>Actions</th></tr></thead>
           <tbody>${rows || empty}</tbody>
         </table>`
       )
@@ -358,7 +474,7 @@ app.get('/', (_req, res) => {
   }
 });
 
-app.get('/hubs/:hubId/forms', (req, res) => {
+app.get('/hubs/:hubId/forms', async (req, res) => {
   let db;
   try {
     db = getDb();
@@ -369,12 +485,30 @@ app.get('/hubs/:hubId/forms', (req, res) => {
       return;
     }
     const form = getFormByHubId(db, hubId);
+    const files = getFilesByHubId(db, hubId);
+    const qrUrl = `https://glode.xyz/c/${hub.code}`;
+    const qrSvg = await QRCode.toString(qrUrl, { type: 'svg' });
+
     let body = `<a href="/" class="back-link">&#x2190; Back to Hubs</a>
-      <h1>${esc(hub.code)} &mdash; ${esc(hub.label)}</h1>`;
+      <h1>${esc(hub.code)} &mdash; ${esc(hub.label)}</h1>
+      <div class="card">
+        <h2>QR Code</h2>
+        <p class="muted" style="margin-bottom:16px">Scans to <code>https://glode.xyz/c/${esc(hub.code)}</code></p>
+        <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
+          <div style="width:180px;flex-shrink:0">${qrSvg}</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <a href="/hubs/${hubId}/qr/download" class="btn btn-secondary">Download QR</a>
+            <a href="/hubs/${hubId}/qr/print" class="btn btn-secondary" target="_blank">Print Sheet</a>
+          </div>
+        </div>
+      </div>`;
 
     if (!form) {
-      body += `<p class="muted" style="margin-bottom:14px">No form attached to this hub.</p>
-        <a href="/hubs/${hubId}/forms/new" class="btn btn-primary">+ Create Form</a>`;
+      body += `<div class="card">
+        <h2>Form</h2>
+        <p class="muted" style="margin-bottom:14px">No form attached to this hub.</p>
+        <a href="/hubs/${hubId}/forms/new" class="btn btn-primary">+ Create Form</a>
+      </div>`;
     } else {
       const fw = getFormWithFields(db, form.id);
       const count = getResponseCount(db, form.id);
@@ -397,7 +531,37 @@ app.get('/hubs/:hubId/forms', (req, res) => {
           : '<p class="muted">No fields defined.</p>'}
       </div>`;
     }
-    res.send(layout('Forms', body));
+
+    const fileRows = files.map((f: HubFile) => `<tr>
+      <td>${esc(f.filename)}</td>
+      <td>${formatSize(f.size)}</td>
+      <td style="font-family:monospace;font-size:.78rem">${esc(f.mimetype)}</td>
+      <td class="muted">${esc(f.created_at)}</td>
+      <td>
+        <a href="/files/${esc(f.stored_name)}" class="btn btn-secondary">Download</a>
+        <form method="POST" action="/hubs/${hubId}/files/${f.id}/delete" style="display:inline">
+          <button type="submit" class="btn btn-danger">Delete</button>
+        </form>
+      </td>
+    </tr>`).join('');
+
+    body += `<div class="card">
+      <div class="abar" style="margin-bottom:12px">
+        <h2 style="margin:0">Files (${files.length})</h2>
+      </div>
+      ${files.length > 0
+        ? `<table><thead><tr><th>Name</th><th>Size</th><th>Type</th><th>Uploaded</th><th></th></tr></thead><tbody>${fileRows}</tbody></table>`
+        : '<p class="muted" style="margin-bottom:12px">No files uploaded.</p>'}
+      <form method="POST" action="/hubs/${hubId}/files" enctype="multipart/form-data"
+        style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="file" name="file"
+          accept=".pdf,.png,.jpg,.jpeg,.gif,.doc,.docx,.xls,.xlsx,.ppt,.pptx"
+          style="font-size:.84rem;flex:1;min-width:200px">
+        <button type="submit" class="btn btn-primary">Upload File</button>
+      </form>
+    </div>`;
+
+    res.send(layout('Hub', body));
   } catch (err) {
     res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
   } finally {
@@ -564,8 +728,252 @@ app.get('/hubs/:hubId/forms/:id/responses/export', (req, res) => {
   }
 });
 
+// ─── analytics routes ────────────────────────────────────────────────────────
+
+app.get('/hubs/:hubId/analytics', (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.hubId, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (!hub) { res.status(404).send(layout('Not Found', '<p>Hub not found.</p>')); return; }
+
+    const stats = getHubAccessStats(db, hubId);
+    const clickStats = getLinkClickStats(db, hubId);
+    const submissionRate = getFormSubmissionRate(db, hubId);
+    const byDay = getHubAccessByDay(db, hubId);
+
+    // Build 7-day labels + counts
+    const days: Array<{ label: string; date: string; count: number }> = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const dateStr = d.toISOString().split('T')[0];
+      const label = d.toLocaleDateString('en-US', { weekday: 'short' });
+      days.push({ label, date: dateStr, count: 0 });
+    }
+    for (const row of byDay) {
+      const d = days.find((x) => x.date === row.date);
+      if (d) d.count = row.count;
+    }
+    const maxCount = Math.max(...days.map((d) => d.count), 1);
+
+    const bars = days.map((d) => {
+      const pct = Math.round((d.count / maxCount) * 100);
+      return `<div class="bar-col">
+        <div class="bar-n">${d.count || ''}</div>
+        <div class="bar-track"><div class="bar-fill" style="height:${pct}%"></div></div>
+        <div class="bar-lbl">${d.label}</div>
+      </div>`;
+    }).join('');
+
+    const total = stats.total_accesses || 1;
+    const clickRows = clickStats.map((c) => {
+      const rate = Math.round((c.clicks / total) * 100);
+      return `<tr>
+        <td>${esc(c.title)}</td>
+        <td style="font-size:.78rem;color:#6b7280;max-width:260px;overflow:hidden;text-overflow:ellipsis">${esc(c.url)}</td>
+        <td><strong>${c.clicks}</strong></td>
+        <td>${rate}%</td>
+      </tr>`;
+    }).join('');
+
+    const dev = stats.device_breakdown;
+    const devTotal = dev.mobile + dev.desktop + dev.unknown || 1;
+    const peakLabel = `${stats.peak_hour}:00–${stats.peak_hour + 1}:00`;
+
+    const body = `
+      <a href="/hubs/${hubId}/forms" class="back-link">&#x2190; Back to Hub</a>
+      <h1>Analytics &mdash; ${esc(hub.code)}</h1>
+
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-val">${stats.accesses_today}</div><div class="stat-lbl">Accessed Today</div></div>
+        <div class="stat-card"><div class="stat-val">${stats.accesses_last_10_min}</div><div class="stat-lbl">Last 10 Min</div></div>
+        <div class="stat-card"><div class="stat-val">${stats.total_accesses}</div><div class="stat-lbl">Total All Time</div></div>
+        <div class="stat-card"><div class="stat-val">${submissionRate}%</div><div class="stat-lbl">Form Submission Rate</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Link Performance</h2>
+        ${clickStats.length > 0
+          ? `<table><thead><tr><th>Link</th><th>URL</th><th>Clicks</th><th>Rate</th></tr></thead><tbody>${clickRows}</tbody></table>`
+          : '<p class="muted">No link clicks recorded yet.</p>'}
+      </div>
+
+      <div class="card">
+        <h2>Accesses — Last 7 Days</h2>
+        <div class="chart-outer">${bars}</div>
+      </div>
+
+      <div class="card">
+        <h2>Device Breakdown</h2>
+        <div class="dev-row">
+          <div class="dev-item"><div class="dev-val">${dev.mobile} <span style="font-size:1rem;color:#9ca3af">(${Math.round(dev.mobile/devTotal*100)}%)</span></div><div class="dev-lbl">Mobile</div></div>
+          <div class="dev-item"><div class="dev-val">${dev.desktop} <span style="font-size:1rem;color:#9ca3af">(${Math.round(dev.desktop/devTotal*100)}%)</span></div><div class="dev-lbl">Desktop</div></div>
+          <div class="dev-item"><div class="dev-val">${dev.unknown} <span style="font-size:1rem;color:#9ca3af">(${Math.round(dev.unknown/devTotal*100)}%)</span></div><div class="dev-lbl">Unknown</div></div>
+          <div class="dev-item" style="margin-left:auto"><div class="dev-val">${peakLabel}</div><div class="dev-lbl">Peak Hour</div></div>
+        </div>
+      </div>`;
+
+    res.send(layout('Analytics', body, '<meta http-equiv="refresh" content="60">'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/analytics', requireAdmin, (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const schoolId = req.user!.school_id;
+    const s = getSchoolWideStats(db, schoolId);
+
+    const hubRows = s.hub_table.map((h, i) => `<tr>
+      <td>${i + 1}</td>
+      <td><code>${esc(h.code)}</code></td>
+      <td>${esc(h.label)}</td>
+      <td><strong>${h.accesses_today}</strong></td>
+      <td>${h.total_accesses}</td>
+    </tr>`).join('');
+
+    const teacherRows = s.teacher_leaderboard.map((t, i) => `<tr>
+      <td>${i + 1}</td>
+      <td>${esc(t.name)}</td>
+      <td><strong>${t.accesses_today}</strong></td>
+    </tr>`).join('');
+
+    const body = `
+      <h1>School Analytics</h1>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="stat-val">${s.total_hubs}</div><div class="stat-lbl">Total Hubs</div></div>
+        <div class="stat-card"><div class="stat-val">${s.accesses_today}</div><div class="stat-lbl">Accesses Today</div></div>
+        <div class="stat-card"><div class="stat-val">${s.form_submissions_today}</div><div class="stat-lbl">Submissions Today</div></div>
+        ${s.most_accessed_hub_today
+          ? `<div class="stat-card"><div class="stat-val">${esc(s.most_accessed_hub_today.code)}</div><div class="stat-lbl">Top Hub Today (${s.most_accessed_hub_today.count} visits)</div></div>`
+          : '<div class="stat-card"><div class="stat-val muted">—</div><div class="stat-lbl">Top Hub Today</div></div>'}
+      </div>
+
+      <div class="card">
+        <h2>All Hubs</h2>
+        ${s.hub_table.length > 0
+          ? `<table><thead><tr><th>#</th><th>Code</th><th>Label</th><th>Today</th><th>All Time</th></tr></thead><tbody>${hubRows}</tbody></table>`
+          : '<p class="muted">No hubs with school assigned.</p>'}
+      </div>
+
+      <div class="card">
+        <h2>Teacher Leaderboard — Today</h2>
+        ${s.teacher_leaderboard.length > 0
+          ? `<table><thead><tr><th>#</th><th>Teacher</th><th>Hub Accesses Today</th></tr></thead><tbody>${teacherRows}</tbody></table>`
+          : '<p class="muted">No data yet.</p>'}
+      </div>`;
+
+    res.send(layout('School Analytics', body, '<meta http-equiv="refresh" content="60">'));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── qr routes ───────────────────────────────────────────────────────────────
+
+app.get('/hubs/:hubId/qr/download', async (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.hubId, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (!hub) { res.status(404).send('Hub not found.'); return; }
+    const buf = await QRCode.toBuffer(`https://glode.xyz/c/${hub.code}`, { type: 'png', width: 600 });
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Disposition', `attachment; filename="lode-${hub.code.toLowerCase()}-qr.png"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(500).send('Error generating QR code: ' + String(err));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/hubs/:hubId/qr/print', async (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const hubId = parseInt(req.params.hubId, 10);
+    const hub = db.prepare('SELECT * FROM hubs WHERE id = ?').get(hubId) as Hub | undefined;
+    if (!hub) { res.status(404).send('Hub not found.'); return; }
+    const svg = await QRCode.toString(`https://glode.xyz/c/${hub.code}`, { type: 'svg' });
+    res.send(renderPrintSheet(hub, svg));
+  } catch (err) {
+    res.status(500).send('Error generating print sheet: ' + String(err));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── file routes ─────────────────────────────────────────────────────────────
+
+app.post('/hubs/:hubId/files', (req, res) => {
+  const hubId = parseInt(req.params.hubId, 10);
+  upload.single('file')(req, res, (err) => {
+    if (err || !req.file) {
+      res.redirect(302, `/hubs/${hubId}/forms`);
+      return;
+    }
+    let db;
+    try {
+      db = getDb();
+      addFile(db, hubId, req.user?.id ?? null, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size);
+      res.redirect(302, `/hubs/${hubId}/forms`);
+    } catch {
+      fs.unlink(req.file!.path, () => {});
+      res.redirect(302, `/hubs/${hubId}/forms`);
+    } finally {
+      if (db) db.close();
+    }
+  });
+});
+
+app.post('/hubs/:hubId/files/:fileId/delete', (req, res) => {
+  const hubId = parseInt(req.params.hubId, 10);
+  const fileId = parseInt(req.params.fileId, 10);
+  let db;
+  try {
+    db = getDb();
+    const file = getFileById(db, fileId);
+    if (file) {
+      fs.unlink(path.join(UPLOAD_DIR, file.stored_name), () => {});
+      deleteFile(db, fileId);
+    }
+    res.redirect(302, `/hubs/${hubId}/forms`);
+  } catch {
+    res.redirect(302, `/hubs/${hubId}/forms`);
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.get('/files/:storedName', (req, res) => {
+  let db;
+  try {
+    db = getDb();
+    const file = getFileByStoredName(db, req.params.storedName);
+    if (!file) { res.status(404).send('File not found.'); return; }
+    const filePath = path.join(UPLOAD_DIR, file.stored_name);
+    if (!fs.existsSync(filePath)) { res.status(404).send('File not found.'); return; }
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Content-Disposition', `attachment; filename="${file.filename.replace(/"/g, '_')}"`);
+    res.sendFile(filePath);
+  } catch {
+    res.status(500).send('Error serving file.');
+  } finally {
+    if (db) db.close();
+  }
+});
+
 // ─── start ───────────────────────────────────────────────────────────────────
 
 app.listen(TEACHER_PORT, () => {
-  console.log(`EduCode teacher dashboard at http://localhost:${TEACHER_PORT}`);
+  console.log(`Lode teacher dashboard at http://localhost:${TEACHER_PORT}`);
 });
