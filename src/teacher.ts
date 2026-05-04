@@ -208,12 +208,13 @@ const CSS = `
     box-shadow: 0 1px 3px rgba(0,0,0,.07); margin-bottom: 20px;
   }
   label.lbl { display: block; font-size: .84rem; font-weight: 500; margin-bottom: 5px; color: #374151; }
-  input[type="text"], textarea, select {
+  input[type="text"], input[type="password"], input[type="email"], textarea, select {
     display: block; width: 100%; padding: 9px 11px;
     border: 1px solid #d1d5db; border-radius: 6px;
     font-size: .9rem; font-family: inherit; color: #111; margin-bottom: 14px;
   }
-  input[type="text"]:focus, textarea:focus, select:focus { outline: none; border-color: #111; }
+  input[type="text"]:focus, input[type="password"]:focus, input[type="email"]:focus,
+  textarea:focus, select:focus { outline: none; border-color: #111; }
   textarea { resize: vertical; }
   .field-row { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; margin-bottom: 10px; background: #fff; }
   .frow-header { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
@@ -248,6 +249,8 @@ const CSS = `
   .dev-item { text-align: center; }
   .dev-val { font-size: 1.4rem; font-weight: 700; color: #111; }
   .dev-lbl { font-size: .78rem; color: #9ca3af; margin-top: 2px; }
+  .alert-success { background: #d1fae5; color: #065f46; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: .88rem; }
+  .alert-error   { background: #fee2e2; color: #b91c1c; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; font-size: .88rem; }
 `;
 
 function layout(title: string, content: string, headExtra = '', role = ''): string {
@@ -758,7 +761,6 @@ app.get('/hubs/:hubId/analytics', (req, res) => {
     const submissionRate = getFormSubmissionRate(db, hubId);
     const byDay = getHubAccessByDay(db, hubId);
 
-    // Build 7-day labels + counts
     const days: Array<{ label: string; date: string; count: number }> = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date(); d.setDate(d.getDate() - i);
@@ -1030,7 +1032,8 @@ app.get('/hubs/:hubId/print', async (req, res) => {
     }
     @media print {
       .print-btn { display: none; }
-      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; padding: 0; }
+      * { box-shadow: none !important; }
     }
   </style>
 </head>
@@ -1511,6 +1514,96 @@ app.post('/onboarding/hub', requireAdmin, (req, res) => {
     res.redirect(302, `/onboarding?step=3&hub=${result.lastInsertRowid}`);
   } catch (err) {
     res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', 'admin'));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+// ─── account ──────────────────────────────────────────────────────────────────
+
+app.get('/account', (req, res) => {
+  const role = req.user?.role ?? '';
+  let db;
+  try {
+    db = getDb();
+    const user = req.user!;
+    const body = `
+      <h1>My Account</h1>
+      <div class="card" style="max-width:480px">
+        <h2 style="margin-bottom:14px">Profile</h2>
+        <table style="box-shadow:none;background:transparent">
+          <tr><td style="padding:6px 0;color:#9ca3af;width:120px;border:none">Name</td><td style="padding:6px 0;border:none"><strong>${esc(user.name)}</strong></td></tr>
+          <tr><td style="padding:6px 0;color:#9ca3af;border:none">Email</td><td style="padding:6px 0;border:none">${esc(user.email)}</td></tr>
+          <tr><td style="padding:6px 0;color:#9ca3af;border:none">Role</td><td style="padding:6px 0;border:none"><span class="badge ${user.role === 'admin' ? 'badge-green' : 'badge-grey'}">${esc(user.role)}</span></td></tr>
+        </table>
+      </div>
+      <div class="card" style="max-width:480px">
+        <h2 style="margin-bottom:14px">Change Password</h2>
+        <form method="POST" action="/account/password">
+          <label class="lbl">Current Password</label>
+          <input type="password" name="current" required>
+          <label class="lbl">New Password</label>
+          <input type="password" name="newpw" required minlength="8">
+          <label class="lbl">Confirm New Password</label>
+          <input type="password" name="confirm" required minlength="8">
+          <button type="submit" class="btn btn-primary">Update Password</button>
+        </form>
+      </div>`;
+    res.send(layout('Account', body, '', role));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
+  } finally {
+    if (db) db.close();
+  }
+});
+
+app.post('/account/password', async (req, res) => {
+  const role = req.user?.role ?? '';
+  let db;
+  try {
+    db = getDb();
+    const user = req.user!;
+    const current = (req.body.current as string || '');
+    const newpw   = (req.body.newpw   as string || '');
+    const confirm = (req.body.confirm  as string || '');
+
+    const renderErr = (msg: string) => {
+      const body = `
+        <h1>My Account</h1>
+        <div class="card" style="max-width:480px">
+          <div class="alert-error">${esc(msg)}</div>
+          <h2 style="margin-bottom:14px">Change Password</h2>
+          <form method="POST" action="/account/password">
+            <label class="lbl">Current Password</label>
+            <input type="password" name="current" required>
+            <label class="lbl">New Password</label>
+            <input type="password" name="newpw" required minlength="8">
+            <label class="lbl">Confirm New Password</label>
+            <input type="password" name="confirm" required minlength="8">
+            <button type="submit" class="btn btn-primary">Update Password</button>
+          </form>
+        </div>`;
+      return layout('Account', body, '', role);
+    };
+
+    if (newpw !== confirm)  { res.send(renderErr('New passwords do not match.')); return; }
+    if (newpw.length < 8)   { res.send(renderErr('Password must be at least 8 characters.')); return; }
+
+    const valid = await bcrypt.compare(current, user.password_hash);
+    if (!valid) { res.send(renderErr('Current password is incorrect.')); return; }
+
+    const hash = await bcrypt.hash(newpw, 10);
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, user.id);
+
+    const body = `
+      <h1>My Account</h1>
+      <div class="card" style="max-width:480px">
+        <div class="alert-success">Password updated successfully.</div>
+        <a href="/account" class="btn btn-secondary">Back to Account</a>
+      </div>`;
+    res.send(layout('Account', body, '', role));
+  } catch (err) {
+    res.status(500).send(layout('Error', `<p style="color:red">${esc(String(err))}</p>`, '', role));
   } finally {
     if (db) db.close();
   }
